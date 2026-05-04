@@ -85,4 +85,26 @@ testReactivate = do
     Some reactivatedEntry <- queryContractId p.operator cid3
     reactivatedEntry.active === True
 
+testDeactivate_nonOperator_fails : Script ()
+testDeactivate_nonOperator_fails = do
+    p <- setupParties
+    cid <- submit p.operator do
+        createCmd DirectoryEntry with
+            operator = p.operator
+            subject = p.alice
+            ldapDn   = "uid=alice,ou=people,dc=etf,dc=com"
+            roles    = ["FundManager"]
+            active   = True
+    submitMustFail p.bob do
+        exerciseCmd cid Deactivate
     
+testCreate_emptyLdapDn_fails : Script ()
+testCreate_emptyLdapDn_fails = do
+    p <- setupParties
+    submitMustFail p.operator do
+        createCmd DirectoryEntry with
+            operator = p.operator
+            subject = p.alice
+            ldapDn   = ""
+            roles    = ["FundManager"]
+            active   = True
