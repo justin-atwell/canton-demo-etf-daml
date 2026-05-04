@@ -1,0 +1,117 @@
+# Canton / Daml .gitignore
+
+# Daml build outputs
+.daml/
+dist/
+target/
+
+# Daml IDE / language server
+.daml-ide/
+*.dar.lock
+
+# Compiled DAR files (usually committed if they're release artifacts,
+# but ignore intermediate build DARs)
+*.dar
+
+# Canton node data / ledger persistence
+canton-data/
+ledger-data/
+participant-data/
+domain-data/
+*.db
+*.mv.db
+
+# Canton logs
+logs/
+*.log
+
+# Canton config secrets / keys
+*.pem
+*.key
+*.p12
+*.jks
+secrets/
+private/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Canton sandbox / test state
+sandbox-data/
+test-ledger/
+canton_sandbox.log
+
+# Java / Scala build artifacts
+*.class
+*.jar
+build/
+out/
+
+# sbt
+.sbt/
+project/target/
+project/project/
+.bsp/
+
+# Maven
+pom.xml.tag
+pom.xml.releaseBackup
+release.properties
+
+# Gradle
+.gradle/
+gradle-app.setting
+!gradle-wrapper.jar
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# VS Code
+.vscode/
+!.vscode/extensions.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Node (for JS/TS codegen or tooling)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python (for scripts/tooling)
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.Python
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Terraform (if infra-as-code is co-located)
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
+# Test reports
+test-results/
+surefire-reports/

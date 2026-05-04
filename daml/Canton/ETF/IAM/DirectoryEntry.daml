@@ -1,0 +1,34 @@
+module Canton.ETF.IAM.DirectoryEntry where
+
+template DirectoryEntry
+    with
+        operator : Party
+        subject  : Party
+        ldapDn   : Text
+        roles    : [Text]
+        active   : Bool
+    where
+        signatory operator
+        observer  subject
+
+        ensure
+            ldapDn /= ""
+            && not (null roles)
+
+        choice Deactivate : ContractId DirectoryEntry
+            controller operator
+            do create this with active = False
+
+        choice UpdateRoles : ContractId DirectoryEntry
+            with newRoles : [Text]
+            controller operator
+            do 
+                assertMsg "newRoles must be non-empty" (not (null newRoles))
+                create this with roles = newRoles
+
+        choice Reactivate : ContractId DirectoryEntry
+            controller operator
+            do
+                assertMsg "Entry is arleady active" (not active)
+                create this with active = True
+        

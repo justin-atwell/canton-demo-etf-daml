@@ -1,0 +1,88 @@
+module Canton.ETF.Test.IAM.DirectoryEntryTest where
+
+import Daml.Script
+import Canton.ETF.IAM.DirectoryEntry
+import DA.Assert
+
+data Parties = Parties
+    with
+        operator : Party
+        alice    : Party
+        bob      : Party
+
+setupParties : Script Parties
+setupParties = do
+    operator <- allocateParty "Operator"
+    alice    <- allocateParty "Alice"
+    bob      <- allocateParty "Bob"
+    return Parties{..}
+
+testCreate : Script ()
+testCreate = do
+    p <- setupParties
+    cid <- submit p.operator do
+        createCmd DirectoryEntry with
+            operator = p.operator
+            subject  = p.alice
+            ldapDn   = "uid=alice,ou=people,dc=etf,dc=com"
+            roles    = ["FundManager"]
+            active   = True
+    Some entry <- queryContractId p.operator cid
+    entry.ldapDn === "uid=alice,ou=people,dc=etf,dc=com"
+    entry.roles === ["FundManager"]
+    entry.active === True
+
+testDeactivate : Script ()
+testDeactivate = do
+    p <- setupParties
+    cid <- submit p.operator do
+        createCmd DirectoryEntry with
+            operator = p.operator
+            subject = p.alice
+            ldapDn   = "uid=alice,ou=people,dc=etf,dc=com"
+            roles    = ["FundManager"]
+            active   = True
+    cid2 <- submit p.operator do
+        exerciseCmd cid Deactivate
+    Some entry <- queryContractId p.operator cid2
+    entry.active === False
+    original <- queryContractId p.operator cid
+    original === None
+
+testUpdateRoles : Script ()
+testUpdateRoles = do
+    p <- setupParties
+    cid <- submit p.operator do
+        createCmd DirectoryEntry with
+            operator = p.operator
+            subject = p.alice
+            ldapDn   = "uid=alice,ou=people,dc=etf,dc=com"
+            roles    = ["FundManager"]
+            active   = True
+    cid2 <- submit p.operator do
+        exerciseCmd cid UpdateRoles with newRoles = ["Auditor"]
+    Some entry <- queryContractId p.operator cid2
+    entry.active === True
+    entry.roles === ["Auditor"]
+
+testReactivate : Script ()
+testReactivate = do
+    p <- setupParties
+    cid <- submit p.operator do
+        createCmd DirectoryEntry with
+            operator = p.operator
+            subject = p.alice
+            ldapDn   = "uid=alice,ou=people,dc=etf,dc=com"
+            roles    = ["FundManager"]
+            active   = True
+    cid2 <- submit p.operator do
+        exerciseCmd cid Deactivate 
+    Some entry <- queryContractId p.operator cid2
+    entry.active === False
+
+    cid3 <- submit p.operator do
+        exerciseCmd cid2 Reactivate
+    Some reactivatedEntry <- queryContractId p.operator cid3
+    reactivatedEntry.active === True
+
+    
