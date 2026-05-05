@@ -39,3 +39,48 @@ testGrantFundManager = do
     cid <- makeGrant p.operator p.alice "FundManager"
     Some entry <- queryContractId p.operator cid
     entry.role === "FundManager"
+
+testRevoke : Script()
+testRevoke = do
+    p <- setupParties
+    cid <- makeGrant p.operator p.alice "MarketMaker"
+    Some entry <- queryContractId p.operator cid
+    entry.role === "MarketMaker"
+
+    submit p.operator do
+        exerciseCmd cid Revoke
+    result <- queryContractId p.operator cid
+    result === None
+
+testInvalidRole_fails : Script()
+testInvalidRole_fails = do
+    p <- setupParties
+    submitMustFail p.operator do
+        createCmd RoleMembership with
+            operator = p.operator
+            grantee = p.alice
+            role = "CBR"
+            grantedAt = baseTime
+
+testRevoke_nonOperator_fails : Script ()
+testRevoke_nonOperator_fails = do
+    p <- setupParties
+    cid <- makeGrant p.operator p.alice "MarketMaker"
+    Some entry <- queryContractId p.operator cid
+
+    submitMustFail p.bob do
+        exerciseCmd cid Revoke
+    
+testTransferOperator : Script ()
+testTransferOperator = do
+    p <- setupParties
+    cid <- makeGrant p.operator p.alice "MarketMaker"
+    Some entry <- queryContractId p.operator cid
+
+    cid2 <- submit [p.operator, p.bob] do
+        exerciseCmd cid TransferOperator with newOperator = p.bob
+
+    Some otherEntry <- queryContractId p.bob cid2
+    otherEntry.operator === p.bob
+
+

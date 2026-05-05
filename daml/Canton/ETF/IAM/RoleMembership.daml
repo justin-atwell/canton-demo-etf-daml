@@ -23,7 +23,7 @@ template RoleMembership
             
         choice TransferOperator : ContractId RoleMembership
             with newOperator : Party
-            controller operator
+            controller operator, newOperator
             do
                 create this with operator = newOperator
 
