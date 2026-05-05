@@ -1,0 +1,41 @@
+module Canton.ETF.Test.IAM.RoleMembershipTest where
+
+import Canton.ETF.IAM.RoleMembership
+import DA.Assert
+import Daml.Script
+import DA.Time (time)
+import DA.Date (date, Month(..))
+
+data Parties = Parties
+    with
+        operator : Party
+        alice    : Party
+        bob      : Party
+        intruder : Party
+
+setupParties : Script Parties
+setupParties = do
+    operator <- allocateParty "Operator"
+    alice <- allocateParty "Alice"
+    bob <-allocateParty "Bob"
+    intruder <- allocateParty "Intruder"
+    return Parties{..}
+
+baseTime : Time
+baseTime = time (date 2025 Jan 1) 0 0 0
+
+makeGrant : Party -> Party -> Text -> Script (ContractId RoleMembership)
+makeGrant operator grantee role =
+    submit operator do
+        createCmd RoleMembership with
+            operator
+            grantee
+            role
+            grantedAt = baseTime
+
+testGrantFundManager : Script ()
+testGrantFundManager = do
+    p <- setupParties
+    cid <- makeGrant p.operator p.alice "FundManager"
+    Some entry <- queryContractId p.operator cid
+    entry.role === "FundManager"

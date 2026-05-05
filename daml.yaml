@@ -12,3 +12,4 @@ dependencies:
 build-options:
   - --ghc-option
   - -Werror
+  - -Wno-template-interface-depends-on-daml-script

@@ -1,0 +1,29 @@
+module Canton.ETF.IAM.RoleMembership where
+
+
+validRoles : [Text]
+validRoles = ["FundManager", "Custodian", "ComplianceOfficer", "Auditor", "MarketMaker"]
+
+template RoleMembership
+    with
+        operator : Party
+        grantee : Party
+        role : Text
+        grantedAt : Time
+    where
+        signatory operator
+        observer grantee
+
+        ensure role `elem` validRoles
+
+        choice Revoke : ()
+            controller operator
+            do
+                return ()
+            
+        choice TransferOperator : ContractId RoleMembership
+            with newOperator : Party
+            controller operator
+            do
+                create this with operator = newOperator
+
