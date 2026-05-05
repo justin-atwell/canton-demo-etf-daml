@@ -1,0 +1,20 @@
+module Canton.ETF.IAM.AccessEvent where
+
+template AccessEvent
+    with
+        operator : Party
+        actor : Party
+        action : Text
+        resource : Text
+        timestamp : Time
+        granted : Bool
+        clientIp : Text
+        sessionId : Text
+    where
+        signatory operator
+        observer actor
+
+        ensure
+            action /= ""
+            && resource /= ""
+        
