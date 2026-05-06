@@ -1,0 +1,35 @@
+module Canton.ETF.Fund.CapTable where
+
+template CapTable 
+    with
+        fundManager : Party
+        custodian : Party
+        ticker : Text
+        totalShares : Decimal
+        entries : [(Party, Decimal)]
+    where
+        signatory fundManager, custodian
+
+        ensure
+            ticker /= ""
+            && totalShares >= 0.0
+
+        choice IssueShares : ContractId CapTable
+            with 
+                recipient : Party
+                amount : Decimal
+            controller custodian
+            do
+                create this with
+                    totalShares = totalShares + amount
+                    entries = (recipient, amount) :: entries
+
+        choice RedeemShares : ContractId CapTable
+            with
+                recipient : Party
+                amount : Decimal
+            controller custodian
+            do
+                create this with
+                    totalShares = totalShares - amount
+                    entries = filter (\(p, _) -> p /= recipient) entries
