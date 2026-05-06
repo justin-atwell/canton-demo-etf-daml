@@ -1,0 +1,20 @@
+module Canton.ETF.Pricing.NAV where
+
+template NAV 
+    with
+        fundManager : Party
+        custodian : Party
+        compliance : Party
+        auditor : Party
+        ticker : Text
+        navDate : Date
+        navPerShare : Decimal
+        totalAUM : Decimal
+        source : Text -- where the price came from
+    where
+        signatory fundManager
+        observer custodian, compliance, auditor
+
+        ensure
+            ticker /= ""
+            && navPerShare > 0.0

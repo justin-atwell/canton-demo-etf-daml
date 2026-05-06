@@ -1,0 +1,57 @@
+module Canton.ETF.Test.Pricing.NAVTest where
+
+import DA.Assert
+import Daml.Script
+import Canton.ETF.Pricing.NAV
+import DA.Date (date, Month(..))
+
+data Parties = Parties
+    with
+        fundManager : Party
+        custodian : Party
+        compliance : Party
+        auditor : Party
+
+setupParties : Script Parties
+setupParties = do
+    fundManager <- allocateParty "FundManager"
+    custodian <- allocateParty "Custodian"
+    compliance <- allocateParty "Compliance"
+    auditor <- allocateParty "Auditor"
+    return Parties{..}
+
+makeNAV : Party -> Party -> Party -> Party -> Script (ContractId NAV)
+makeNAV fundManager custodian compliance auditor = 
+    submit fundManager do
+        createCmd NAV with
+            fundManager
+            custodian
+            compliance
+            auditor
+            ticker = "SPY"
+            navDate = date 2025 Jan 1
+            navPerShare = (679.01)
+            totalAUM = (1543333.14)
+            source = "polygon"
+
+testCreate : Script ()
+testCreate = do
+    p <- setupParties
+    cid <- makeNAV p.fundManager p.custodian p.compliance p.auditor
+    Some entry <- queryContractId p.fundManager cid
+    entry.ticker === "SPY"
+
+testEmptyTickerFails : Script ()
+testEmptyTickerFails = do
+    p <- setupParties
+    submitMustFail p.fundManager do
+        createCmd NAV with
+            fundManager = p.fundManager
+            custodian = p.custodian
+            compliance = p.compliance
+            auditor = p.auditor
+            ticker = ""
+            navDate = date 2025 Jan 1
+            navPerShare = (679.01)
+            totalAUM = (1543333.14)
+            source = "polygon"
