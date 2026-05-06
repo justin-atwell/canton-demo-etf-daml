@@ -1,0 +1,61 @@
+module Canton.ETF.Test.Fund.ConstituentTest where
+
+import Canton.ETF.Fund.Constituent
+import DA.Assert
+import Daml.Script
+
+data Parties = Parties
+    with
+        fundManager : Party
+
+setupParties : Script Parties
+setupParties = do
+    fundManager <- allocateParty "FundManager"
+    return Parties{..}
+
+makeConstituent : Party -> Script (ContractId Constituent)
+makeConstituent fundManager = 
+    submit fundManager do
+        createCmd Constituent with
+            fundManager
+            ticker = "SPY"
+            symbol = "SPY"
+            name = "S&P 500"
+            cusip = "12233"
+            weight = (0.09)
+
+testCreate : Script ()
+testCreate = do
+    p <- setupParties
+    cid <- makeConstituent p.fundManager
+    Some entry <- queryContractId p.fundManager cid
+
+    entry.ticker === "SPY"
+    entry.symbol === "SPY"
+    entry.name === "S&P 500"
+    entry.cusip === "12233"
+    entry.weight === (0.09)
+
+testUpdateWeight : Script ()
+testUpdateWeight = do
+    p <- setupParties
+    cid <- makeConstituent p.fundManager
+    Some entry <- queryContractId p.fundManager cid
+
+    cid2 <- submit p.fundManager do
+        exerciseCmd cid UpdateWeight with newWeight = (0.05)
+
+    Some otherEntry <- queryContractId p.fundManager cid2
+    otherEntry.weight === (0.05 : Decimal)
+
+testInvalidWeight_fails : Script ()
+testInvalidWeight_fails = do
+    p <- setupParties
+    submitMustFail p.fundManager do
+        createCmd Constituent with
+            fundManager = p.fundManager
+            ticker = "SPY"
+            symbol = "SPY"
+            name = "S&P 500"
+            cusip = "12233"
+            weight = (1.5)
