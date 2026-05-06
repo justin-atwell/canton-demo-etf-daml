@@ -1,0 +1,26 @@
+module Canton.ETF.Fund.Constituent where
+
+template Constituent
+    with
+        fundManager : Party
+        ticker : Text
+        symbol : Text
+        name : Text
+        cusip : Text
+        weight : Decimal
+    where
+        signatory fundManager
+
+        ensure
+            ticker /= ""
+            && symbol /= ""
+            && name /= ""
+            && cusip /= ""
+            && weight > 0.0
+            && weight <= 1.0 
+            
+        choice UpdateWeight : ContractId Constituent
+            with newWeight : Decimal
+            controller fundManager
+            do
+                create this with weight = newWeight

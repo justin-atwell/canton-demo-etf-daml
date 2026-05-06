@@ -1,0 +1,86 @@
+module Canton.ETF.Test.Fund.ETFDefinitionTest where
+
+import Canton.ETF.Fund.ETFDefinition
+import DA.Assert
+import Daml.Script
+import DA.Time (time)
+import DA.Date (date, Month(..))
+
+data Parties = Parties
+    with
+        fundManager : Party
+        custodian : Party
+        compliance : Party
+        auditor : Party
+
+setupParties : Script Parties
+setupParties = do
+    fundManager <- allocateParty "FundManager"
+    custodian <- allocateParty "Custodian"
+    compliance <- allocateParty "Compliance"
+    auditor <- allocateParty "Auditor"
+    return Parties{..}
+
+baseTime : Time
+baseTime = time (date 2025 Jan 1) 0 0 0
+
+makeETF : Party -> Party -> Party -> Party -> Script (ContractId ETFDefinition)
+makeETF fundManager custodian compliance auditor =
+    submit fundManager do
+        createCmd ETFDefinition with
+            fundManager
+            custodian
+            compliance
+            auditor
+            ticker      = "SPY"
+            name        = "SPDR S&P 500"
+            cusip       = "78462F103"
+            status      = "Active"
+            inceptionDate = date 2025 Jan 1
+
+testCreate : Script ()
+testCreate = do
+    p <- setupParties
+    cid <- makeETF p.fundManager p.custodian p.compliance p.auditor
+    Some entry <- queryContractId p.fundManager cid
+    entry.ticker === "SPY"
+
+testSuspend : Script ()
+testSuspend = do
+    p <- setupParties
+    cid <- makeETF p.fundManager p.custodian p.compliance p.auditor
+    Some entry <- queryContractId p.fundManager cid
+
+    cid2 <- submit [p.fundManager, p.compliance] do
+        exerciseCmd cid Suspend
+
+    Some otherEntry <- queryContractId p.fundManager cid2    
+    otherEntry.status === "Suspended"
+
+testTerminate : Script ()
+testTerminate = do
+    p <- setupParties
+    cid <- makeETF p.fundManager p.custodian p.compliance p.auditor
+    Some entry <- queryContractId p.fundManager cid
+
+    submit p.compliance do
+        exerciseCmd cid Terminate
+    result <- queryContractId p.compliance cid
+    result === None
+
+testEmptyTicker_fails : Script ()
+testEmptyTicker_fails = do
+    p <- setupParties
+    submitMustFail p.fundManager do
+        createCmd ETFDefinition with
+            fundManager = p.fundManager
+            custodian = p.custodian
+            compliance = p.compliance
+            auditor = p.auditor
+            ticker      = ""
+            name        = "SPDR S&P 500"
+            cusip       = "78462F103"
+            status      = "Active"
+            inceptionDate = date 2025 Jan 1
+
+    

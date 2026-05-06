@@ -1,0 +1,49 @@
+module Canton.ETF.Fund.ETFDefinition where
+
+import Canton.ETF.Fund.Constituent
+
+template ETFDefinition
+    with
+        fundManager : Party
+        custodian : Party
+        compliance : Party
+        auditor : Party
+        ticker : Text
+        name : Text
+        cusip : Text
+        status : Text
+        inceptionDate : Date
+    where 
+        signatory fundManager
+        observer custodian, compliance, auditor
+    
+        ensure 
+            ticker /= ""
+            && name /= ""
+            && cusip /= ""
+
+        choice Suspend : ContractId ETFDefinition
+            controller fundManager, compliance
+            do create this with status = "Suspended"
+
+        choice Terminate : ()
+            controller compliance
+            do
+                return ()
+
+        choice AddConstituent : ContractId Constituent
+            with
+                symbol : Text
+                name : Text
+                cusip : Text
+                weight : Decimal
+            controller fundManager
+            do
+                create Constituent with
+                    fundManager
+                    ticker
+                    symbol
+                    name
+                    cusip
+                    weight
+
