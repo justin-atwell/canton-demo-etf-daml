@@ -1,0 +1,27 @@
+module Canton.ETF.Pricing.NBBOQuote where
+
+template NBBOQuote
+    with
+        marketMaker : Party
+        fundManager : Party
+        compliance : Party
+        auditor : Party
+        symbol : Text
+        bidPrice : Decimal
+        askPrice : Decimal
+        bidSize : Int
+        askSize : Int
+        timestamp : Time
+    where
+        signatory marketMaker
+        observer fundManager, compliance, auditor
+
+        ensure 
+            symbol /= ""
+            && bidPrice > 0.0
+            && askPrice > 0.0
+
+        choice Consume : ()
+            controller marketMaker
+            do
+                return ()

@@ -1,0 +1,115 @@
+module Canton.ETF.Test.Pricing.NBBOQuoteTest where
+
+import DA.Assert
+import Daml.Script
+import Canton.ETF.Pricing.NBBOQuote
+import DA.Time (time)
+import DA.Date (date, Month(..))
+
+data Parties = Parties
+    with
+        marketMaker : Party
+        fundManager : Party
+        compliance : Party
+        auditor : Party
+
+setupParties : Script Parties
+setupParties = do
+    marketMaker <- allocateParty "MarketMaker"
+    fundManager <- allocateParty "FundManager"
+    compliance <- allocateParty "Compliance"
+    auditor <- allocateParty "Auditor"
+    return Parties{..}
+
+baseTime : Time
+baseTime = time (date 2026 Apr 1) 0 0 0
+
+makeQuote : Party -> Party -> Party -> Party -> Script (ContractId NBBOQuote)
+makeQuote marketMaker fundManager compliance auditor =
+    submit marketMaker do
+        createCmd NBBOQuote with
+            marketMaker
+            fundManager
+            compliance
+            auditor
+            symbol = "SPY"
+            bidPrice = (10.04)
+            askPrice = (14.43)
+            bidSize = 44
+            askSize = 33
+            timestamp = baseTime
+
+testCreate : Script ()
+testCreate = do
+    p <- setupParties
+    cid <- makeQuote p.marketMaker p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.marketMaker cid
+
+    entry.symbol === "SPY"
+    entry.bidPrice === (10.04)
+    entry.askPrice === (14.43)
+    entry.bidSize === 44
+    entry.askSize === 33
+
+testEmptySymbol_fails : Script ()
+testEmptySymbol_fails = do
+    p <- setupParties
+    submitMustFail p.marketMaker do
+        createCmd NBBOQuote with
+            marketMaker = p.marketMaker
+            fundManager = p.fundManager
+            compliance = p.compliance
+            auditor = p.auditor
+            symbol = ""
+            bidPrice = (10.02)
+            askPrice = (11.03)
+            bidSize = 12
+            askSize = 98
+            timestamp = baseTime
+
+testBadBidPrice_fails : Script ()
+testBadBidPrice_fails = do
+    p <- setupParties
+    submitMustFail p.marketMaker do
+        createCmd NBBOQuote with
+            marketMaker = p.marketMaker
+            fundManager = p.fundManager
+            compliance = p.compliance
+            auditor = p.auditor
+            symbol = "SPY"
+            bidPrice = (-10.02)
+            askPrice = (11.03)
+            bidSize = 12
+            askSize = 98
+            timestamp = baseTime
+
+testBadAskPrice_fails : Script ()
+testBadAskPrice_fails = do
+    p <- setupParties
+    submitMustFail p.marketMaker do
+        createCmd NBBOQuote with
+            marketMaker = p.marketMaker
+            fundManager = p.fundManager
+            compliance = p.compliance
+            auditor = p.auditor
+            symbol = "SPY"
+            bidPrice = (10.02)
+            askPrice = (-11.03)
+            bidSize = 12
+            askSize = 98
+            timestamp = baseTime
+
+testConsume : Script ()
+testConsume = do
+    p <- setupParties
+    cid <- makeQuote p.marketMaker p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.marketMaker cid
+
+    submit p.marketMaker do
+        exerciseCmd cid Consume
+
+    result <- queryContractId p.marketMaker cid
+    result === None
+
+
+
