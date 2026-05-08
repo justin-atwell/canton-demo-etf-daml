@@ -1,0 +1,85 @@
+module Canton.ETF.Test.Collateral.CollateralLockTest where
+
+import Canton.ETF.Collateral.CollateralLock
+
+import DA.Assert
+import Daml.Script
+import DA.Time (time)
+import DA.Date (date, Month(..))
+
+data Parties = Parties
+    with
+        custodian: Party
+        fundManager: Party
+        compliance: Party
+        auditor: Party
+
+setupParties: Script Parties
+setupParties = do
+    custodian <- allocateParty "Custodian"
+    fundManager <- allocateParty "FundManager"
+    compliance <- allocateParty "Compliance"
+    auditor <- allocateParty "Auditor"
+    return Parties{..}
+
+someTime: Time
+someTime = time (date 2026 Jan 1) 0 0 0
+
+makeLock: Party -> Party -> Party -> Party -> Script (ContractId CollateralLock)
+makeLock custodian fundManager compliance auditor =
+    submit custodian do
+        createCmd CollateralLock with
+            custodian
+            fundManager
+            compliance
+            auditor
+            asset = "test"
+            amount = (1.0)
+            reason = "bills"
+            expiry = someTime
+            lockedAt = someTime
+
+testCreate: Script()
+testCreate = do
+    p <- setupParties
+    cid <- makeLock p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    entry.amount === (1.0 : Decimal)
+
+testRelease : Script()
+testRelease = do
+    p <- setupParties
+    cid <- makeLock p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    cid2 <- submit p.custodian do
+        exerciseCmd cid Release with releaseReason = "because i paid"
+    
+    Some otherEntry <- queryContractId p.custodian cid2
+    otherEntry.reason === "because i paid"
+
+testLiquidate : Script ()
+testLiquidate = do
+    p <- setupParties
+    cid <- makeLock p.custodian p.fundManager p.compliance p.auditor
+   
+    Some entry <- queryContractId p.custodian cid
+
+    cid2 <- submit p.custodian do
+        exerciseCmd cid Liquidate with liquidateReason = "There are no atheists at 50x leverage"
+
+    Some otherEntry <- queryContractId p.custodian cid2
+    otherEntry.reason === "There are no atheists at 50x leverage"
+
+testRelease_nonCustodian_failsSpectacularly : Script()
+testRelease_nonCustodian_failsSpectacularly = do
+    p <- setupParties
+    cid <- makeLock p.custodian p.fundManager p.compliance p.auditor
+
+    Some entry <- queryContractId p.custodian cid
+
+    submitMustFail p.auditor do
+        exerciseCmd cid Release with releaseReason = ""
+
+    

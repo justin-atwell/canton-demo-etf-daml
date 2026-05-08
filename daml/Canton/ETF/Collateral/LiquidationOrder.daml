@@ -1,0 +1,19 @@
+module Canton.ETF.Collateral.LiquidationOrder where
+
+template LiquidationOrder
+    with
+        custodian : Party
+        fundManager : Party
+        compliance : Party
+        auditor : Party
+        asset : Text
+        amount : Decimal
+        reason : Text
+        liquidatedAt : Time
+    where
+        signatory custodian
+        observer fundManager, compliance, auditor
+
+        ensure
+            asset /= ""
+            && amount > (0.0)

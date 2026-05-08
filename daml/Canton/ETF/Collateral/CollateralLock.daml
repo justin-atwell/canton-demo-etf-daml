@@ -1,5 +1,8 @@
 module Canton.ETF.Collateral.CollateralLock where
 
+import Canton.ETF.Collateral.CollateralRelease
+import Canton.ETF.Collateral.LiquidationOrder
+
 template CollateralLock
     with
         custodian: Party
@@ -15,3 +18,39 @@ template CollateralLock
     where
         signatory custodian
         observer fundManager, compliance, auditor
+
+        ensure
+            asset /= ""
+    
+        choice Release : ContractId CollateralRelease
+            with releaseReason : Text
+            controller custodian
+            do
+                now <- getTime
+
+                create CollateralRelease with
+                    custodian
+                    fundManager
+                    compliance
+                    auditor
+                    asset
+                    amount
+                    reason = releaseReason
+                    releasedAt = now
+
+        choice Liquidate : ContractId LiquidationOrder
+            with liquidateReason : Text
+            controller custodian
+            do
+                now <- getTime
+
+                create LiquidationOrder with
+                    custodian
+                    fundManager
+                    compliance
+                    auditor
+                    asset
+                    amount
+                    reason = liquidateReason
+                    liquidatedAt = now
+        
