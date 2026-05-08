@@ -1,0 +1,28 @@
+module Canton.ETF.Collateral.MarginCall where
+
+template MarginCall
+    with
+        custodian : Party
+        fundManager : Party
+        compliance : Party
+        auditor : Party
+        asset : Text
+        amountRequired : Decimal
+        issuedAt : Time
+        dueBy : Time
+        status : Text
+    where
+        signatory custodian
+        observer fundManager, compliance, auditor
+
+        choice Meet : ContractId MarginCall
+            controller fundManager
+            do
+                create this with
+                    status = "Met"
+
+        choice Default : ContractId MarginCall
+            controller custodian
+            do
+                create this with
+                    status = "Defaulted"

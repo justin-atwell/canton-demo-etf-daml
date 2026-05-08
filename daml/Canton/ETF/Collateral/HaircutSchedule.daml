@@ -1,0 +1,20 @@
+module Canton.ETF.Collateral.HaircutSchedule where
+
+template HaircutSchedule
+    with
+        compliance : Party
+        auditor : Party
+        scheduleId : Text
+        entries : [(Text, Decimal)]
+    where
+        signatory compliance
+        observer auditor
+
+        choice UpdateHaircut : ContractId HaircutSchedule
+            with
+                asset : Text
+                rate : Decimal 
+            controller compliance
+            do
+                create this with
+                    entries = (asset, rate) :: filter (\(a, _) -> a /= asset) entries

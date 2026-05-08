@@ -1,0 +1,71 @@
+module Canton.ETF.Test.Collateral.MarginCallTest where
+
+import Canton.ETF.Collateral.MarginCall
+import DA.Assert
+import Daml.Script
+import DA.Time (time)
+import DA.Date(date, Month(..))
+
+data Parties = Parties
+    with
+        custodian : Party
+        fundManager : Party
+        compliance : Party
+        auditor : Party
+
+setupParties : Script Parties
+setupParties = do
+    custodian <- allocateParty "Custodian"
+    fundManager <- allocateParty "FundManager"
+    compliance <- allocateParty "Compliance"
+    auditor <- allocateParty "Auditor"
+    return Parties{..}
+
+someTime : Time
+someTime = time (date 2026 Jan 1) 0 0 0
+
+makeMarginCall : Party -> Party -> Party -> Party -> Script (ContractId MarginCall)
+makeMarginCall custodian fundManager compliance auditor = 
+    submit custodian do
+        createCmd MarginCall with
+            custodian
+            fundManager
+            compliance
+            auditor
+            asset = "SPY"
+            amountRequired = (1.0)
+            issuedAt = someTime
+            dueBy = someTime
+            status = "Pending"
+
+testCreate : Script ()
+testCreate = do
+    p <- setupParties
+    cid <- makeMarginCall p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    entry.status === "Pending"
+
+testMeet : Script ()
+testMeet = do
+    p <- setupParties
+    cid <- makeMarginCall p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+    
+    cid2 <- submit p.fundManager do
+        exerciseCmd cid Meet
+
+    Some otherEntry <- queryContractId p.compliance cid2
+    otherEntry.status === "Met"
+
+testDefault : Script()
+testDefault = do
+    p <-setupParties
+    cid <- makeMarginCall p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    cid2 <- submit p.custodian do
+        exerciseCmd cid Default
+
+    Some otherEntry <- queryContractId p.custodian cid2
+    otherEntry.status === "Defaulted"

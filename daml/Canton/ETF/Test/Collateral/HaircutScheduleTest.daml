@@ -1,0 +1,47 @@
+module Canton.ETF.Test.Collateral.HaircutScheduleTest where
+
+import Canton.ETF.Collateral.HaircutSchedule
+import DA.Assert
+import Daml.Script
+
+data Parties = Parties
+    with
+        compliance : Party
+        auditor : Party
+
+setupParties : Script Parties
+setupParties = do
+    compliance <- allocateParty "Compliance"
+    auditor <- allocateParty "Auditor"
+    return Parties{..}
+
+makeHaircutSchedule : Party -> Party -> Script (ContractId HaircutSchedule)
+makeHaircutSchedule compliance auditor = 
+    submit compliance do
+        createCmd HaircutSchedule with
+            compliance
+            auditor
+            scheduleId = "1b"
+            entries = []
+
+testCreate : Script ()
+testCreate = do
+    p <- setupParties
+    cid <- makeHaircutSchedule p.compliance p.auditor
+    Some entry <- queryContractId p.compliance cid
+
+    entry.scheduleId === "1b"
+
+testUpdateHaircut : Script()
+testUpdateHaircut = do
+    p <- setupParties
+    cid <- makeHaircutSchedule p.compliance p.auditor
+    Some entry <- queryContractId p.compliance cid
+
+    cid2 <- submit p.compliance do
+        exerciseCmd cid UpdateHaircut with
+            asset = "Treasury"
+            rate = (2.0)
+
+    Some otherEntry <- queryContractId p.compliance cid2
+    otherEntry.entries === [("Treasury", 2.0)]
