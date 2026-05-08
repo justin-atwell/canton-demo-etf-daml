@@ -1,0 +1,45 @@
+module Canton.ETF.Rebalance.RebalanceProposal where
+
+import Canton.ETF.Rebalance.RebalanceExecution
+
+template RebalanceProposal
+    with
+        fundManager : Party
+        custodian : Party
+        compliance : Party
+        auditor : Party
+        ticker : Text
+        proposalId : Text
+        newWeights : [(Text, Decimal)]
+        proposedAt : Time
+        status : Text --Pending"  "Approved" "Rejected" "Executed"
+    where
+        signatory fundManager
+        observer custodian, compliance, auditor
+
+        ensure
+            ticker /= ""
+
+        choice Approve : ContractId RebalanceProposal
+            controller compliance
+                do create this with status = "Approved" 
+
+        choice Reject : ContractId RebalanceProposal
+            controller compliance
+                do create this with status = "Rejected" 
+
+        choice Execute : ContractId RebalanceExecution
+            controller fundManager
+                do
+                    assert (status == "Approved")
+
+                    now <- getTime
+                    create RebalanceExecution with
+                        fundManager
+                        custodian
+                        compliance
+                        auditor
+                        ticker
+                        proposalId
+                        executedWeights = newWeights
+                        executedAt = now

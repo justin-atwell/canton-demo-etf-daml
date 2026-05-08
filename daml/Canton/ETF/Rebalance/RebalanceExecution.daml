@@ -1,0 +1,15 @@
+module Canton.ETF.Rebalance.RebalanceExecution where
+
+template RebalanceExecution
+    with
+        fundManager : Party
+        custodian : Party
+        compliance : Party
+        auditor : Party
+        ticker : Text
+        proposalId : Text
+        executedWeights : [(Text, Decimal)]
+        executedAt : Time
+    where
+        signatory fundManager
+        observer custodian, compliance, auditor

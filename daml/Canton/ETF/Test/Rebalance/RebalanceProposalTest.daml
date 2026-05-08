@@ -1,0 +1,95 @@
+module Canton.ETF.Test.Rebalance.RebalanceProposalTest where
+
+import Canton.ETF.Rebalance.RebalanceProposal
+import DA.Assert
+import Daml.Script
+import DA.Time (time)
+import DA.Date (date, Month(..))
+
+someTime : Time
+someTime = time (date 2026 Jan 1) 0 0 0
+
+data Parties = Parties
+    with
+        fundManager : Party
+        custodian : Party
+        compliance : Party
+        auditor : Party
+        
+setupParties : Script Parties
+setupParties = do
+    fundManager <- allocateParty "FundManager"
+    custodian <- allocateParty "Custodian"
+    compliance <- allocateParty "Compliance"
+    auditor <- allocateParty "Auditor"
+    return Parties{..}
+
+makeProposal : Party -> Party -> Party -> Party -> Script (ContractId RebalanceProposal)
+makeProposal fundManager custodian compliance auditor =
+    submit fundManager do
+        createCmd RebalanceProposal with
+            fundManager
+            custodian
+            compliance
+            auditor
+            ticker = "SPY"
+            proposalId = "4"
+            newWeights = [("SPY", 0.90)]
+            proposedAt = someTime
+            status = "Pending"
+    
+testCreate : Script()
+testCreate = do
+    p <- setupParties
+    cid <- makeProposal p.fundManager p.custodian p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+    entry.ticker === "SPY"
+
+testApprove : Script()
+testApprove = do
+    p <- setupParties
+    cid <- makeProposal p.fundManager p.custodian p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    cid2 <- submit p.compliance do
+        exerciseCmd cid Approve
+
+    Some otherEntry <- queryContractId p.custodian cid2
+    otherEntry.status === "Approved"
+
+testReject : Script()
+testReject = do
+    p <- setupParties
+    cid <- makeProposal p.fundManager p.custodian p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    cid2 <- submit p.compliance do
+        exerciseCmd cid Reject
+
+    Some otherEntry <- queryContractId p.custodian cid2
+    otherEntry.status === "Rejected"
+
+testExecute : Script()
+testExecute = do
+    p <- setupParties
+    cid <- makeProposal p.fundManager p.custodian p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    cid2 <- submit p.compliance do
+        exerciseCmd cid Approve
+    
+    cid3 <- submit p.fundManager do
+        exerciseCmd cid2 Execute
+
+    Some otherEntry <- queryContractId p.custodian cid3
+    otherEntry.executedWeights === [("SPY", 0.90 : Decimal)]
+    
+testExecute_notApproved_fails : Script()
+testExecute_notApproved_fails = do
+    p <- setupParties
+    cid <- makeProposal p.fundManager p.custodian p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+    
+    submitMustFail p.fundManager do
+        exerciseCmd cid Execute
+

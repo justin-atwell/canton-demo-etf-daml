@@ -13,7 +13,7 @@ template CollateralAccount
         accountId : Text
     where
         signatory custodian
-        observer fundManager
+        observer fundManager, compliance, auditor
 
         ensure asset /= ""
 
