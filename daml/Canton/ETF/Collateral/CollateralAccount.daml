@@ -1,0 +1,57 @@
+module Canton.ETF.Collateral.CollateralAccount where
+
+import Canton.ETF.Collateral.CollateralLock
+
+template CollateralAccount
+    with
+        custodian : Party
+        fundManager : Party
+        compliance : Party
+        auditor : Party
+        asset : Text
+        balance : Decimal
+        accountId : Text
+    where
+        signatory custodian
+        observer fundManager
+
+        ensure asset /= ""
+
+        choice Deposit : ContractId CollateralAccount
+            with amount : Decimal
+            controller custodian
+            
+            do
+                create this with balance = balance + amount
+                
+        choice Lock : (ContractId CollateralAccount, ContractId CollateralLock)
+            with
+                amount : Decimal
+                reason : Text
+                expiry : Time
+            controller custodian
+            do
+                assertMsg "insufficient balance" (amount <= balance) -- transaction fails. this is not just a message lol
+                
+                now <- getTime            
+                lockCid <- create CollateralLock with
+                    custodian
+                    fundManager
+                    compliance
+                    auditor
+                    asset
+                    amount
+                    reason
+                    expiry
+                    lockedAt = now
+                accountCid <- create this with balance = balance - amount
+                return (accountCid, lockCid)
+        
+        choice Withdraw : (ContractId CollateralAccount)
+            with amount : Decimal
+            controller custodian
+            do 
+                assertMsg "insufficent balance" (amount <= balance)
+                create this with balance = balance - amount 
+                    
+

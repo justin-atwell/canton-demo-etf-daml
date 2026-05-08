@@ -1,0 +1,105 @@
+module Canton.ETF.Test.Collateral.CollateralAccountTest where
+
+import Canton.ETF.Collateral.CollateralAccount
+import DA.Assert
+import Daml.Script
+import DA.Time (time)
+import DA.Date (date, Month(..))
+
+data Parties = Parties
+    with
+        custodian : Party
+        fundManager : Party
+        compliance : Party
+        auditor : Party
+
+setupParties : Script Parties
+setupParties = do
+    custodian <- allocateParty "Custodian"
+    fundManager <- allocateParty "FundManager"
+    compliance <- allocateParty "Compliance"
+    auditor <- allocateParty "Auditor"
+    return Parties{..}
+
+someTime : Time
+someTime = time (date 2026 Jan 1) 0 0 0
+
+makeAccount : Party -> Party -> Party -> Party -> Script (ContractId CollateralAccount)
+makeAccount custodian fundManager compliance auditor = 
+    submit custodian do
+        createCmd CollateralAccount with
+            custodian
+            fundManager
+            compliance
+            auditor
+            asset = "SPY"
+            balance = (0.0)
+            accountId = "333333m"
+
+testCreate : Script ()
+testCreate = do
+    p <- setupParties
+    cid <- makeAccount p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+    entry.asset === "SPY"
+    entry.balance === (0.0 : Decimal)
+
+testDeposit : Script()
+testDeposit = do
+    p <- setupParties
+    cid <- makeAccount p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    cid2 <- submit p.custodian do
+        exerciseCmd cid Deposit with
+            amount = (1000.0)
+
+    Some otherEntry <- queryContractId p.custodian cid2
+    otherEntry.balance === (1000.0 : Decimal)
+
+testWithdraw : Script ()
+testWithdraw = do
+    p <- setupParties
+    cid <- makeAccount p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    cid2 <- submit p.custodian do
+        exerciseCmd cid Deposit with amount = (10.0)
+
+    cid3 <- submit p.custodian do
+        exerciseCmd cid2 Withdraw with
+            amount = (6.0)
+    
+    Some otherEntry <- queryContractId p.custodian cid3
+    otherEntry.balance === (4.0 : Decimal)
+
+testWithdraw_insufficientBalance_fails : Script ()
+testWithdraw_insufficientBalance_fails = do
+    p <- setupParties
+    cid <- makeAccount p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    submitMustFail p.custodian do
+        exerciseCmd cid Withdraw with amount = (1.0)
+
+testLock : Script ()
+testLock = do
+    p <- setupParties
+    cid <- makeAccount p.custodian p.fundManager p.compliance p.auditor
+    Some entry <- queryContractId p.custodian cid
+
+    cid2 <- submit p.custodian do
+        exerciseCmd cid Deposit with amount = (10.0)
+
+    (accountCid, lockCid) <- submit p.custodian do
+        exerciseCmd cid2 Lock 
+            with 
+                amount = (5.0)
+                reason = "we have bills to pay"
+                expiry = someTime
+
+    Some otherEntry <- queryContractId p.custodian accountCid
+    otherEntry.balance === (5.0 : Decimal)
+
+    Some lockEntry <- queryContractId p.custodian lockCid
+    lockEntry.reason === "we have bills to pay"

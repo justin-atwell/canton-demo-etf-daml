@@ -1,0 +1,17 @@
+module Canton.ETF.Collateral.CollateralLock where
+
+template CollateralLock
+    with
+        custodian: Party
+        fundManager: Party
+        compliance: Party
+        auditor: Party
+        asset: Text
+        amount: Decimal
+        reason: Text
+        expiry : Time
+        lockedAt : Time
+
+    where
+        signatory custodian
+        observer fundManager, compliance, auditor
