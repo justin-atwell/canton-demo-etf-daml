@@ -4,6 +4,7 @@ template AccessEvent
     with
         operator : Party
         actor : Party
+        auditor : Party
         action : Text
         resource : Text
         timestamp : Time
@@ -12,7 +13,7 @@ template AccessEvent
         sessionId : Text
     where
         signatory operator
-        observer actor
+        observer actor, auditor
 
         ensure
             action /= ""

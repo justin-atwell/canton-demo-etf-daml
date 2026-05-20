@@ -31,7 +31,7 @@ template ETFDefinition
             do
                 return ()
 
-        choice AddConstituent : ContractId Constituent
+        nonconsuming choice AddConstituent : ContractId Constituent
             with
                 symbol : Text
                 name : Text

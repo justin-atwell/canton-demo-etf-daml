@@ -10,22 +10,25 @@ data Parties = Parties
     with
         operator : Party
         actor : Party
+        auditor : Party
 
 setupParties : Script Parties
 setupParties = do
     operator <- allocateParty "Operator"
     actor <- allocateParty "Actor"
+    auditor <- allocateParty "Auditor"
     return Parties{..}
 
 baseTime : Time
 baseTime = time (date 2026 Jan 1) 0 0 0
 
-makeEvent : Party -> Party -> Text -> Text -> Bool -> Script (ContractId AccessEvent)
-makeEvent operator actor action resource granted = 
+makeEvent : Party -> Party -> Party -> Text -> Text -> Bool -> Script (ContractId AccessEvent)
+makeEvent operator actor auditor action resource granted = 
     submit operator do
         createCmd AccessEvent with
             operator
             actor
+            auditor
             action
             resource
             timestamp = baseTime
@@ -36,7 +39,7 @@ makeEvent operator actor action resource granted =
 testAccessEvent : Script ()
 testAccessEvent = do
     p <- setupParties
-    cid <- makeEvent p.operator p.actor "add permissions" "ETF/SPY" True
+    cid <- makeEvent p.operator p.actor p.auditor "add permissions" "ETF/SPY" True
     Some entry <- queryContractId p.operator cid
     entry.action === "add permissions"
     entry.resource === "ETF/SPY"
@@ -50,6 +53,7 @@ testEmptyActionFails = do
         createCmd AccessEvent with
             operator = p.operator
             actor = p.actor
+            auditor = p.auditor
             action = ""
             resource = "ETF/SPY"
             timestamp = baseTime
@@ -64,6 +68,7 @@ testEmptyResourceFials = do
         createCmd AccessEvent with
             operator = p.operator
             actor = p.actor
+            auditor = p.auditor
             action = "add permisions"
             resource = ""
             timestamp = baseTime

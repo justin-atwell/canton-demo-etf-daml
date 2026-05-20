@@ -1,0 +1,12 @@
+// Connect the participant to the local domain
+val participant = participants.local
+val domain = domains.local
+
+participant.domains.connect_local(domain, alias = "local")
+
+// Wait for connectivity
+utils.retry_until_true {
+  participant.domains.active("local")
+}
+
+println("Participant connected to local domain successfully")
