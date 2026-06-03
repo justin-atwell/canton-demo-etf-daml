@@ -1,0 +1,67 @@
+module Canton.ETF.PrimeBrokerage.CollateralPool where
+
+import Canton.ETF.PrimeBrokerage.CollateralAsset
+
+-- all posted collateral. source of truth
+template CollateralPool
+    with
+        hedgeFund : Party
+        custodian : Party
+        riskManager : Party
+        poolId : Text
+        positions : [CollateralPosition]
+        totalValue : Decimal
+        lastUpdated : Time
+    where
+        signatory hedgeFund, custodian
+        observer riskManager
+
+        ensure totalValue >= 0.0
+
+        choice AddPosition : ContractId CollateralPool
+            with
+                newPosition : CollateralPosition -- new position being added
+            controller hedgeFund
+            do
+                let updatedPositions = positions ++ [newPosition]
+
+                --recompute everytime because running totals are bad
+                let updatedTotal = foldl (+) 0.0(map (\p -> computeHaircutAdjustedValue p.asset p.haircut) updatedPositions)
+
+                now <- getTime
+                create this with
+                    positions = updatedPositions
+                    totalValue  = updatedTotal
+                    lastUpdated = now
+        
+        choice RemovePosition : ContractId CollateralPool
+            with
+                positionId : Text
+            controller hedgeFund
+            do
+                let updatedPositions = filter (\p -> p.positionId /= positionId) positions
+                let updatedTotal = foldl (+) 0.0(map (\p -> computeHaircutAdjustedValue p.asset p.haircut) updatedPositions)
+
+                now <- getTime
+                create this with
+                    positions   = updatedPositions
+                    totalValue  = updatedTotal
+                    lastUpdated = now
+
+    -- | Custodian revalues the pool — updates spot prices and NAVs.
+    -- Only the custodian can trigger revaluation. They hold the assets
+    -- and are the authoritative source on current value.
+    -- In production this would be triggered by the Polygon.io oracle feed.
+        choice RevaluePool : ContractId CollateralPool
+            with
+                updatedPositions : [CollateralPosition]  -- positions with fresh valuations
+            controller custodian
+            do
+                let updatedTotal = foldl (+) 0.0(map (\p -> computeHaircutAdjustedValue p.asset p.haircut) updatedPositions)
+
+                now <- getTime
+                create this with
+                    positions   = updatedPositions
+                    totalValue  = updatedTotal
+                    lastUpdated = now
+

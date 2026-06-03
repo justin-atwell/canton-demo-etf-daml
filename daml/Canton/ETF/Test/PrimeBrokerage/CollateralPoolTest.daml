@@ -1,0 +1,152 @@
+module Canton.ETF.Test.PrimeBrokerage.CollateralPoolTest where
+
+import Daml.Script
+import DA.Assert
+import DA.Date (date, Month(..))
+import Canton.ETF.PrimeBrokerage.CollateralAsset
+import Canton.ETF.PrimeBrokerage.CollateralPool
+
+data Parties = Parties with
+    hedgeFund : Party
+    custodian : Party
+    riskManager : Party
+
+setupParties : Script Parties
+setupParties = do
+    hedgeFund <- allocateParty "HedgeFund"
+    custodian <- allocateParty "Custodian"
+    riskManager <- allocateParty "RiskManager"
+    return Parties{..}
+
+makePool : Party -> Party -> Party -> Script (ContractId CollateralPool)
+makePool hedgeFund custodian riskManager = do
+    now <- getTime
+
+    --per documentation, submitmulti is how you do multiparty agreements
+    submitMulti [hedgeFund, custodian] [] do
+        createCmd CollateralPool with
+            hedgeFund
+            custodian
+            riskManager
+            poolId = "POOL-001"
+            positions = []
+            totalValue = 0.0
+            lastUpdated = now
+
+makeTreasuryPosition : Party -> Time -> CollateralPosition
+makeTreasuryPosition hedgeFund now = CollateralPosition with
+    asset = TokenizedTreasury with
+        cusip = "912796TY0"
+        maturityDate = date 2026 Jun 30
+        faceValue = 10000.00
+        issuer = "US Treasury"
+        accruedInterest = 5000.0
+    haircut = HaircutRate with rate = 0.03
+    positionId = "POS-TREASURY-001"
+    postingParty = hedgeFund
+    valuedAt = now
+
+makeBtcPosition : Party -> Time -> CollateralPosition
+makeBtcPosition hedgeFund now = CollateralPosition with
+  asset = BitcoinCollateral with
+    custodianRef  = "COINBASE-REF-001"
+    walletAddress = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+    quantity      = 10.0
+    spotPrice     = 65000.0
+    volatility30d = 0.45
+  haircut      = HaircutRate with rate = 0.25
+  positionId   = "POS-BTC-001"
+  postingParty = hedgeFund
+  valuedAt     = now
+
+testCreateEmptyPool : Script()
+testCreateEmptyPool = do
+    p <- setupParties
+    cid <- makePool p.hedgeFund p.custodian p.riskManager
+
+    Some pool <- queryContractId p.hedgeFund cid
+
+    pool.totalValue === 0.0
+    pool.poolId === "POOL-001"
+
+testAddPosition : Script()
+testAddPosition = do
+    p <- setupParties
+    cid <- makePool p.hedgeFund p.custodian p.riskManager
+    now <- getTime
+    let pos = makeTreasuryPosition p.hedgeFund now
+    cid2 <- submit p.hedgeFund do
+        exerciseCmd cid AddPosition with newPosition = pos
+
+    Some pool <- queryContractId p.hedgeFund cid2
+    pool.totalValue === 14550.0
+    length pool.positions === 1
+
+-- | Removing a position updates totalValue correctly
+testRemovePosition : Script ()
+testRemovePosition = do
+  p    <- setupParties
+  cid  <- makePool p.hedgeFund p.custodian p.riskManager
+  now  <- getTime
+  let treasuryPos = makeTreasuryPosition p.hedgeFund now
+  let btcPos      = makeBtcPosition p.hedgeFund now
+  cid2 <- submit p.hedgeFund do
+    exerciseCmd cid AddPosition with newPosition = treasuryPos
+  cid3 <- submit p.hedgeFund do
+    exerciseCmd cid2 AddPosition with newPosition = btcPos
+  -- remove the treasury position
+  cid4 <- submit p.hedgeFund do
+    exerciseCmd cid3 RemovePosition with positionId = "POS-TREASURY-001"
+  Some pool <- queryContractId p.hedgeFund cid4
+  -- only BTC remains
+  pool.totalValue       === 487500.0
+  length pool.positions === 1
+
+-- | Custodian can revalue the pool — hedgeFund cannot
+testRevaluePool : Script ()
+testRevaluePool = do
+  p   <- setupParties
+  cid <- makePool p.hedgeFund p.custodian p.riskManager
+  now <- getTime
+  let pos = makeTreasuryPosition p.hedgeFund now
+  cid2 <- submit p.hedgeFund do
+    exerciseCmd cid AddPosition with newPosition = pos
+  -- revalue with updated spot — same position, new spotPrice baked in
+  let revaluedPos = pos with
+        asset = TokenizedTreasury with
+          cusip           = "912796TY0"
+          maturityDate    = date 2026 Jun 30
+          faceValue       = 1000000.0
+          issuer          = "US Treasury"
+          accruedInterest = 10000.0  -- accrued interest has grown
+  cid3 <- submit p.custodian do
+    exerciseCmd cid2 RevaluePool with updatedPositions = [revaluedPos]
+  Some pool <- queryContractId p.custodian cid3
+  -- ($1,000,000 + $10,000) * (1 - 0.03) = $1,010,000 * 0.97 = $979,700
+  pool.totalValue === 979700.0
+
+-- | HedgeFund cannot revalue — only custodian controls valuation
+testRevalue_hedgeFundCannotRevalue_fails : Script ()
+testRevalue_hedgeFundCannotRevalue_fails = do
+  p   <- setupParties
+  cid <- makePool p.hedgeFund p.custodian p.riskManager
+  now <- getTime
+  let pos = makeTreasuryPosition p.hedgeFund now
+  cid2 <- submit p.hedgeFund do
+    exerciseCmd cid AddPosition with newPosition = pos
+  -- hedgeFund trying to revalue should be rejected at the ledger layer
+  submitMustFail p.hedgeFund do
+    exerciseCmd cid2 RevaluePool with updatedPositions = [pos]
+
+-- | RiskManager can query the pool but cannot exercise any choices
+testRiskManager_canObserve : Script ()
+testRiskManager_canObserve = do
+  p   <- setupParties
+  cid <- makePool p.hedgeFund p.custodian p.riskManager
+  now <- getTime
+  let pos = makeTreasuryPosition p.hedgeFund now
+  cid2 <- submit p.hedgeFund do
+    exerciseCmd cid AddPosition with newPosition = pos
+  -- riskManager can query — they are an observer
+  Some pool <- queryContractId p.riskManager cid2
+  pool.totalValue === 14550.0

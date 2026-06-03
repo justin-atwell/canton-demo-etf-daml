@@ -1,0 +1,87 @@
+module Canton.ETF.Test.PrimeBrokerage.CollateralAssetTest where
+
+import Daml.Script
+import DA.Assert
+import DA.Date (date, Month(..))
+import Canton.ETF.PrimeBrokerage.CollateralAsset
+
+-- | Reusable party record — same pattern as existing tests
+data Parties = Parties with
+  hedgeFund : Party
+  custodian : Party
+
+setupParties : Script Parties
+setupParties = do
+  hedgeFund <- allocateParty "HedgeFund"
+  custodian <- allocateParty "Custodian"
+  return Parties{..}
+
+-- | Reusable fixtures — call these from each test rather than rebuilding inline
+makeTreasury : AssetType
+makeTreasury = TokenizedTreasury with
+  cusip           = "912796TY0"
+  maturityDate    = date 2026 Jun 30
+  faceValue       = 1000000.0
+  issuer          = "US Treasury"
+  accruedInterest = 5000.0
+
+makeBtc : AssetType
+makeBtc = BitcoinCollateral with
+  custodianRef  = "COINBASE-REF-001"
+  walletAddress = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+  quantity      = 10.0
+  spotPrice     = 65000.0
+  volatility30d = 0.45
+
+makeMmf : AssetType
+makeMmf = MoneyMarketFundShare with
+  fundName    = "Fidelity Government MMF"
+  shareClass  = "Institutional"
+  navPerShare = 1.0
+  quantity    = 500000.0
+
+-- | Treasury haircut math
+-- ($1,000,000 + $5,000) * (1 - 0.03) = $974,850
+testTreasuryHaircutValue : Script ()
+testTreasuryHaircutValue = do
+  let haircut = HaircutRate with rate = 0.03
+  let value   = computeHaircutAdjustedValue makeTreasury haircut
+  value === 974850.0
+
+-- | BTC haircut math
+-- 10 * $65,000 * (1 - 0.25) = $487,500
+testBtcHaircutValue : Script ()
+testBtcHaircutValue = do
+  let haircut = HaircutRate with rate = 0.25
+  let value   = computeHaircutAdjustedValue makeBtc haircut
+  value === 487500.0
+
+-- | MMF haircut math
+-- 500,000 * $1.00 * (1 - 0.005) = $497,500
+testMmfHaircutValue : Script ()
+testMmfHaircutValue = do
+  let haircut = HaircutRate with rate = 0.005
+  let value   = computeHaircutAdjustedValue makeMmf haircut
+  value === 497500.0
+
+-- | Zero haircut should return full gross value
+-- MMF at 0% haircut: 500,000 * $1.00 * 1.0 = $500,000
+testZeroHaircutReturnsGrossValue : Script ()
+testZeroHaircutReturnsGrossValue = do
+  let haircut = HaircutRate with rate = 0.0
+  let value   = computeHaircutAdjustedValue makeMmf haircut
+  value === 500000.0
+
+-- | CollateralPosition assembles correctly with a real Party
+testCollateralPositionConstruction : Script ()
+testCollateralPositionConstruction = do
+  p   <- setupParties
+  now <- getTime
+  let position = CollateralPosition with
+        asset        = makeTreasury
+        haircut      = HaircutRate with rate = 0.03
+        positionId   = "POS-001"
+        postingParty = p.hedgeFund
+        valuedAt     = now
+  position.postingParty === p.hedgeFund
+  position.positionId   === "POS-001"

@@ -1,0 +1,74 @@
+module Canton.ETF.PrimeBrokerage.CollateralAsset where
+
+-- | Identifies which type of asset is being used as collateral.
+-- This is a sum type — exactly one of these three variants is valid at a time.
+-- Canton's type system enforces this. No null checks. No instanceof. No surprises.
+data AssetType
+  = TokenizedTreasury with
+      cusip          : Text     -- unique identifier for the specific treasury security
+      maturityDate   : Date     -- when the bond matures — affects haircut calculation
+      faceValue      : Decimal  -- par value of the instrument
+      issuer         : Text     -- e.g. "US Treasury"
+      accruedInterest: Decimal  -- ticks up daily — collateral value grows over time
+  | BitcoinCollateral with
+      custodianRef   : Text     -- reference at the custodian holding the BTC
+      walletAddress  : Text     -- on-chain address for verification
+      quantity       : Decimal  -- BTC quantity (fractional, hence Decimal not Int)
+      spotPrice      : Decimal  -- price at time of last valuation
+      volatility30d  : Decimal  -- 30-day realized vol — drives dynamic haircut
+  | MoneyMarketFundShare with
+      fundName       : Text     -- e.g. "Fidelity Government MMF"
+      shareClass     : Text     -- e.g. "Institutional"
+      navPerShare    : Decimal  -- daily NAV — published on-chain by fund admin
+      quantity       : Decimal  -- number of shares held
+  deriving (Eq, Show)
+
+
+-- | The haircut is the percentage discount applied to collateral value.
+-- A 20% haircut on $1M BTC means only $800K counts toward margin coverage.
+-- This type captures a haircut as a value between 0.0 and 1.0.
+-- We store it as a named type for clarity — not a raw Decimal floating around.
+data HaircutRate = HaircutRate with
+  rate : Decimal  -- 0.05 = 5% haircut. 0.20 = 20% haircut.
+    deriving (Eq, Show)
+
+
+-- | Computes the haircut-adjusted value of a collateral asset.
+-- This is a pure function — no ledger state, no side effects.
+-- Given an asset and its haircut rate, returns the margin-eligible value.
+-- 
+-- This is where the institutional logic lives:
+-- Treasury: (faceValue + accruedInterest) * (1 - haircut)
+-- BTC:      quantity * spotPrice * (1 - haircut)
+-- MMF:      quantity * navPerShare * (1 - haircut)
+computeHaircutAdjustedValue : AssetType -> HaircutRate -> Decimal
+computeHaircutAdjustedValue asset (HaircutRate rate) =
+  let grossValue = case asset of
+        TokenizedTreasury{faceValue, accruedInterest} ->
+          faceValue + accruedInterest
+        BitcoinCollateral{quantity, spotPrice} ->
+          quantity * spotPrice
+        MoneyMarketFundShare{quantity, navPerShare} ->
+          quantity * navPerShare
+  in grossValue * (1.0 - rate)
+
+
+-- | Concentration limit — how much of a single asset type can exist
+-- in a collateral pool as a percentage of total pool value.
+-- Prevents a fund from posting 100% BTC and calling it diversified collateral.
+data ConcentrationLimit = ConcentrationLimit with
+  assetClass : Text     -- "BTC", "TREASURY", "MMF"
+  maxPercent : Decimal  -- 0.25 = max 25% of pool in this asset class
+    deriving (Eq, Show)
+
+
+-- | A fully described collateral position — asset + its current haircut + quantity metadata.
+-- This is what gets stored inside a CollateralPool contract.
+-- Think of this as the line item on a margin statement.
+data CollateralPosition = CollateralPosition with
+  asset        : AssetType
+  haircut      : HaircutRate
+  positionId   : Text     -- unique identifier for this position
+  postingParty : Party    -- who posted this collateral (the HedgeFund)
+  valuedAt     : Time     -- when this position was last valued
+    deriving (Eq, Show)
