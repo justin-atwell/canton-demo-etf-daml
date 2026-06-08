@@ -1,0 +1,140 @@
+module Canton.ETF.PrimeBrokerage.SubstitutionRequest where
+
+import Canton.ETF.PrimeBrokerage.CollateralAsset
+import Canton.ETF.PrimeBrokerage.CollateralPool
+
+-- Pending: created by HedgeFund, awaiting PrimeBroker review
+-- ApprovedByBroker: PrimeBroker approved, awaiting Custodian confirmation
+-- Completed: Custodian confirmed, CollateralPool updated atomically
+-- Rejected: PrimeBroker or Custodian rejected, with reason
+data SubstitutionStatus
+  = Pending
+  | ApprovedByBroker
+  | Completed
+  | Rejected with rejectionReason : Text
+  deriving (Eq, Show)
+
+-- SubstitutionRequest models the full lifecycle of a collateral swap.
+-- Three-party workflow: HedgeFund initiates, PrimeBroker approves,
+-- Custodian confirms.
+--
+-- Signatories: HedgeFund — they initiate and own the request
+-- Observers:   PrimeBroker, Custodian, RiskManager
+--
+-- Why is PrimeBroker an observer and not a signatory?
+-- Because the request exists before they approve it.
+-- Their approval is expressed by exercising a choice — not by
+-- co-signing creation. This is the Daml pattern for workflow states
+-- where parties join the agreement progressively.
+template SubstitutionRequest
+  with
+    hedgeFund      : Party
+    primeBroker    : Party
+    custodian      : Party
+    riskManager    : Party
+    requestId      : Text
+    outgoingPosId  : Text              -- positionId being removed from pool
+    outgoingAsset  : AssetType         -- asset being substituted out
+    incomingAsset  : AssetType         -- asset being substituted in
+    incomingHaircut: HaircutRate       -- haircut on the incoming asset
+    poolCid        : ContractId CollateralPool  -- the pool being modified
+    status         : SubstitutionStatus
+    createdAt      : Time
+    updatedAt      : Time
+  where
+    signatory hedgeFund
+    observer  primeBroker, custodian, riskManager
+
+    --PrimeBroker reviews the incoming asset against their criteria.
+    -- If approved, status advances to ApprovedByBroker.
+    -- nonconsuming on the eligibility schedule — consuming on THIS contract.
+    -- The old Pending contract is archived, a new ApprovedByBroker one created.
+    choice ApproveByCustodian : ContractId SubstitutionRequest
+      with
+        comment : Text
+      controller primeBroker
+      do
+        let incomingValue =
+              computeHaircutAdjustedValue incomingAsset incomingHaircut
+        let outgoingValue =
+              computeHaircutAdjustedValue outgoingAsset
+                (HaircutRate with rate = 0.0)  -- gross value for comparison
+
+        -- incoming haircut-adjusted value must meet or exceed outgoing gross
+        -- this protects the prime broker — they can't receive less value
+        assertMsg
+          ("Incoming haircut-adjusted value " <> show incomingValue <>
+           " must meet or exceed outgoing value " <> show outgoingValue)
+          (incomingValue >= outgoingValue * 0.95)  -- 5% tolerance
+
+        now <- getTime
+        create this with
+          status    = ApprovedByBroker
+          updatedAt = now
+
+    -- | PrimeBroker rejects the request — incoming asset unacceptable.
+    choice RejectByBroker : ContractId SubstitutionRequest
+      with
+        reason : Text
+      controller primeBroker
+      do
+        now <- getTime
+        create this with
+          status    = Rejected with rejectionReason = reason
+          updatedAt = now
+
+    -- Custodian confirms the physical asset transfer has occurred.
+    -- This is the final step — it atomically:
+    -- 1. Archives this SubstitutionRequest as Completed
+    -- 2. Updates the CollateralPool — removes outgoing, adds incoming
+    -- Returns both the completed request AND the updated pool.
+    choice ConfirmTransfer : (ContractId SubstitutionRequest, ContractId CollateralPool)
+      with
+        newIncomingPosition : CollateralPosition  -- fully described incoming position
+      controller custodian
+      do
+        assertMsg
+          "Request must be approved by broker before custodian can confirm"
+          (status == ApprovedByBroker)
+
+        now <- getTime
+
+        -- fetch the current pool — we need its state to modify it
+        pool <- fetch poolCid
+
+        -- remove the outgoing position from the pool
+        let updatedPositions =
+              filter (\p -> p.positionId /= outgoingPosId) pool.positions
+
+        -- add the incoming position
+        let finalPositions = updatedPositions ++ [newIncomingPosition]
+
+        -- recompute total value from scratch
+        let updatedTotal = foldl (+) 0.0
+              (map (\p -> computeHaircutAdjustedValue p.asset p.haircut)
+               finalPositions)
+
+        -- archive the old pool, create the updated one
+        archive poolCid
+        newPoolCid <- create pool with
+          positions   = finalPositions
+          totalValue  = updatedTotal
+          lastUpdated = now
+
+        -- mark this request as completed
+        completedCid <- create this with
+          status    = Completed
+          updatedAt = now
+
+        return (completedCid, newPoolCid)
+
+    -- | Custodian rejects the transfer — asset verification failed.
+    choice RejectByCustodian : ContractId SubstitutionRequest
+      with
+        reason : Text
+      controller custodian
+      do
+        now <- getTime
+        create this with
+          status    = Rejected with rejectionReason = reason
+          updatedAt = now

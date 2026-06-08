@@ -74,7 +74,9 @@ testAddPosition = do
     p <- setupParties
     cid <- makePool p.hedgeFund p.custodian p.riskManager
     now <- getTime
+    
     let pos = makeTreasuryPosition p.hedgeFund now
+    
     cid2 <- submit p.hedgeFund do
         exerciseCmd cid AddPosition with newPosition = pos
 
@@ -108,7 +110,9 @@ testRevaluePool = do
   p   <- setupParties
   cid <- makePool p.hedgeFund p.custodian p.riskManager
   now <- getTime
+  
   let pos = makeTreasuryPosition p.hedgeFund now
+  
   cid2 <- submit p.hedgeFund do
     exerciseCmd cid AddPosition with newPosition = pos
   -- revalue with updated spot — same position, new spotPrice baked in
@@ -131,7 +135,9 @@ testRevalue_hedgeFundCannotRevalue_fails = do
   p   <- setupParties
   cid <- makePool p.hedgeFund p.custodian p.riskManager
   now <- getTime
+  
   let pos = makeTreasuryPosition p.hedgeFund now
+  
   cid2 <- submit p.hedgeFund do
     exerciseCmd cid AddPosition with newPosition = pos
   -- hedgeFund trying to revalue should be rejected at the ledger layer
@@ -144,7 +150,9 @@ testRiskManager_canObserve = do
   p   <- setupParties
   cid <- makePool p.hedgeFund p.custodian p.riskManager
   now <- getTime
+  
   let pos = makeTreasuryPosition p.hedgeFund now
+  
   cid2 <- submit p.hedgeFund do
     exerciseCmd cid AddPosition with newPosition = pos
   -- riskManager can query — they are an observer

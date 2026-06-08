@@ -1,0 +1,76 @@
+module Canton.ETF.PrimeBrokerage.CollateralEligibility where
+
+import Canton.ETF.PrimeBrokerage.CollateralAsset
+
+
+data EligibilityResult
+  = Eligible with
+      haircutAdjustedValue : Decimal
+  | Ineligible with
+      reason : Text
+  deriving (Eq, Show)
+
+
+template CollateralEligibility
+  with
+    primeBroker          : Party
+    hedgeFund            : Party
+    scheduleId           : Text
+    acceptsTreasuries    : Bool
+    acceptsBitcoin       : Bool
+    acceptsMMF           : Bool
+    maxBtcConcentration  : Decimal  -- e.g. 0.25 = max 25% of posted collateral in BTC
+    maxTreasuryConc      : Decimal  -- e.g. 0.60
+    maxMmfConcentration  : Decimal  -- e.g. 0.80
+    minHaircutAdjValue   : Decimal  -- minimum haircut-adjusted value to be eligible
+  where
+    signatory primeBroker
+    observer  hedgeFund
+
+    ensure
+      maxBtcConcentration  > 0.0 && maxBtcConcentration  <= 1.0 &&
+      maxTreasuryConc      > 0.0 && maxTreasuryConc      <= 1.0 &&
+      maxMmfConcentration  > 0.0 && maxMmfConcentration  <= 1.0 &&
+      minHaircutAdjValue   >= 0.0
+
+    nonconsuming choice CheckEligibility : EligibilityResult
+      with
+        position : CollateralPosition
+      controller hedgeFund
+      do
+        let adjustedValue =
+              computeHaircutAdjustedValue position.asset position.haircut
+
+        -- Step 1: is the asset type accepted at all?
+        let assetAccepted = case position.asset of
+              TokenizedTreasury{} -> acceptsTreasuries
+              BitcoinCollateral{} -> acceptsBitcoin
+              MoneyMarketFundShare{} -> acceptsMMF
+
+        if not assetAccepted
+          then return Ineligible with
+            reason = "Asset type not accepted by this prime broker"
+
+        -- Step 2: does it meet minimum haircut-adjusted value?
+        else if adjustedValue < minHaircutAdjValue
+          then return Ineligible with
+            reason = "Haircut-adjusted value " <> show adjustedValue <>
+                     " below minimum " <> show minHaircutAdjValue
+
+        -- Step 3: all checks passed
+        else return Eligible with
+          haircutAdjustedValue = adjustedValue
+
+    choice UpdateSchedule : ContractId CollateralEligibility
+      with
+        newMaxBtcConc     : Decimal
+        newMaxTreasuryConc: Decimal
+        newMaxMmfConc     : Decimal
+        newMinValue       : Decimal
+      controller primeBroker
+      do
+        create this with
+          maxBtcConcentration = newMaxBtcConc
+          maxTreasuryConc     = newMaxTreasuryConc
+          maxMmfConcentration = newMaxMmfConc
+          minHaircutAdjValue  = newMinValue

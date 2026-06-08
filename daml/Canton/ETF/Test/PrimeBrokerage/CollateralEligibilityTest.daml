@@ -1,0 +1,203 @@
+module Canton.ETF.Test.PrimeBrokerage.CollateralEligibilityTest where
+
+import Daml.Script
+import DA.Assert
+import DA.Date (date, Month(..))
+import Canton.ETF.PrimeBrokerage.CollateralAsset
+import Canton.ETF.PrimeBrokerage.CollateralEligibility
+
+data Parties = Parties with
+  primeBroker : Party
+  hedgeFund   : Party
+
+setupParties : Script Parties
+setupParties = do
+  primeBroker <- allocateParty "PrimeBroker"
+  hedgeFund   <- allocateParty "HedgeFund"
+  return Parties{..}
+
+makeEligibilitySchedule : Party -> Party -> Script (ContractId CollateralEligibility)
+makeEligibilitySchedule primeBroker hedgeFund =
+  submit primeBroker do
+    createCmd CollateralEligibility with
+      primeBroker
+      hedgeFund
+      scheduleId           = "SCHED-001"
+      acceptsTreasuries    = True
+      acceptsBitcoin       = True
+      acceptsMMF           = True
+      maxBtcConcentration  = 0.25
+      maxTreasuryConc      = 0.60
+      maxMmfConcentration  = 0.80
+      minHaircutAdjValue   = 100000.0  -- $100K minimum
+
+makeTreasuryPosition : Party -> Time -> CollateralPosition
+makeTreasuryPosition hedgeFund now = CollateralPosition with
+  asset = TokenizedTreasury with
+    cusip           = "912796TY0"
+    maturityDate    = date 2026 Jun 30
+    faceValue       = 1000000.0
+    issuer          = "US Treasury"
+    accruedInterest = 5000.0
+  haircut      = HaircutRate with rate = 0.03
+  positionId   = "POS-TREASURY-001"
+  postingParty = hedgeFund
+  valuedAt     = now
+
+makeBtcPosition : Party -> Time -> CollateralPosition
+makeBtcPosition hedgeFund now = CollateralPosition with
+  asset = BitcoinCollateral with
+    custodianRef  = "COINBASE-REF-001"
+    walletAddress = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+    quantity      = 10.0
+    spotPrice     = 65000.0
+    volatility30d = 0.45
+  haircut      = HaircutRate with rate = 0.25
+  positionId   = "POS-BTC-001"
+  postingParty = hedgeFund
+  valuedAt     = now
+
+makeSmallBtcPosition : Party -> Time -> CollateralPosition
+makeSmallBtcPosition hedgeFund now = CollateralPosition with
+  asset = BitcoinCollateral with
+    custodianRef  = "COINBASE-REF-002"
+    walletAddress = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+    quantity      = 0.1            -- tiny position
+    spotPrice     = 65000.0
+    volatility30d = 0.45
+  haircut      = HaircutRate with rate = 0.25
+  positionId   = "POS-BTC-SMALL-001"
+  postingParty = hedgeFund
+  valuedAt     = now
+
+testTreasuryEligible : Script ()
+testTreasuryEligible = do
+  p   <- setupParties
+  cid <- makeEligibilitySchedule p.primeBroker p.hedgeFund
+  now <- getTime
+
+  let pos = makeTreasuryPosition p.hedgeFund now
+
+  result <- submit p.hedgeFund do
+    exerciseCmd cid CheckEligibility with position = pos
+  result === Eligible with haircutAdjustedValue = 974850.0
+
+testBtcEligible : Script ()
+testBtcEligible = do
+  p   <- setupParties
+  cid <- makeEligibilitySchedule p.primeBroker p.hedgeFund
+  now <- getTime
+
+  let pos = makeBtcPosition p.hedgeFund now
+
+  result <- submit p.hedgeFund do
+    exerciseCmd cid CheckEligibility with position = pos
+  result === Eligible with haircutAdjustedValue = 487500.0
+
+
+testBtcRejectedWhenNotAccepted : Script ()
+testBtcRejectedWhenNotAccepted = do
+  p <- setupParties
+  cid <- submit p.primeBroker do
+    createCmd CollateralEligibility with
+      primeBroker          = p.primeBroker
+      hedgeFund            = p.hedgeFund
+      scheduleId           = "SCHED-NO-BTC"
+      acceptsTreasuries    = True
+      acceptsBitcoin       = False   -- explicitly rejected
+      acceptsMMF           = True
+      maxBtcConcentration  = 0.25
+      maxTreasuryConc      = 0.60
+      maxMmfConcentration  = 0.80
+      minHaircutAdjValue   = 100000.0
+  now <- getTime
+  let pos = makeBtcPosition p.hedgeFund now
+  result <- submit p.hedgeFund do
+    exerciseCmd cid CheckEligibility with position = pos
+  result === Ineligible with
+    reason = "Asset type not accepted by this prime broker"
+
+testBtcRejectedBelowMinimumValue : Script ()
+testBtcRejectedBelowMinimumValue = do
+  p   <- setupParties
+  cid <- makeEligibilitySchedule p.primeBroker p.hedgeFund
+  now <- getTime
+  let pos = makeSmallBtcPosition p.hedgeFund now
+  result <- submit p.hedgeFund do
+    exerciseCmd cid CheckEligibility with position = pos
+  result === Ineligible with
+    reason = "Haircut-adjusted value 4875.0 below minimum 100000.0"
+
+--nonconsuming — schedule survives multiple CheckEligibility calls
+testScheduleSurvivesMultipleChecks : Script ()
+testScheduleSurvivesMultipleChecks = do
+  p   <- setupParties
+  cid <- makeEligibilitySchedule p.primeBroker p.hedgeFund
+  now <- getTime
+  let treasuryPos = makeTreasuryPosition p.hedgeFund now
+  let btcPos      = makeBtcPosition p.hedgeFund now
+  -- exercise the same cid twice — proves nonconsuming
+  result1 <- submit p.hedgeFund do
+    exerciseCmd cid CheckEligibility with position = treasuryPos
+  result2 <- submit p.hedgeFund do
+    exerciseCmd cid CheckEligibility with position = btcPos
+  result1 === Eligible with haircutAdjustedValue = 974850.0
+  result2 === Eligible with haircutAdjustedValue = 487500.0
+
+-- PrimeBroker can update the schedule — hedgeFund sees new rules
+testUpdateSchedule : Script ()
+testUpdateSchedule = do
+  p    <- setupParties
+  cid  <- makeEligibilitySchedule p.primeBroker p.hedgeFund
+  -- prime broker tightens limits — volatile market conditions
+  cid2 <- submit p.primeBroker do
+    exerciseCmd cid UpdateSchedule with
+      newMaxBtcConc      = 0.10   -- tightened from 25% to 10%
+      newMaxTreasuryConc = 0.60
+      newMaxMmfConc      = 0.80
+      newMinValue        = 250000.0  -- raised minimum from $100K to $250K
+  Some schedule <- queryContractId p.hedgeFund cid2
+  schedule.maxBtcConcentration === 0.10
+  schedule.minHaircutAdjValue  === 250000.0
+
+-- HedgeFund cannot update the schedule — primeBroker controls it
+testHedgeFundCannotUpdateSchedule : Script ()
+testHedgeFundCannotUpdateSchedule = do
+  p   <- setupParties
+  cid <- makeEligibilitySchedule p.primeBroker p.hedgeFund
+  submitMustFail p.hedgeFund do
+    exerciseCmd cid UpdateSchedule with
+      newMaxBtcConc      = 0.99
+      newMaxTreasuryConc = 0.99
+      newMaxMmfConc      = 0.99
+      newMinValue        = 0.0
+
+--nsure block rejects invalid concentration limits at creation
+-- maxBtcConcentration of 0.0 violates ensure > 0.0
+testInvalidScheduleRejected : Script ()
+testInvalidScheduleRejected = do
+  p <- setupParties
+  submitMustFail p.primeBroker do
+    createCmd CollateralEligibility with
+      primeBroker          = p.primeBroker
+      hedgeFund            = p.hedgeFund
+      scheduleId           = "SCHED-INVALID"
+      acceptsTreasuries    = True
+      acceptsBitcoin       = True
+      acceptsMMF           = True
+      maxBtcConcentration  = 0.0   -- violates ensure > 0.0
+      maxTreasuryConc      = 0.60
+      maxMmfConcentration  = 0.80
+      minHaircutAdjValue   = 100000.0
+
+-- | PrimeBroker cannot see another PrimeBroker's schedule
+-- This proves Canton privacy — query returns None for non-stakeholder
+testPrimeBrokerCannotSeeRivalsSchedule : Script ()
+testPrimeBrokerCannotSeeRivalsSchedule = do
+  p            <- setupParties
+  rivalBroker  <- allocateParty "RivalBroker"
+  cid          <- makeEligibilitySchedule p.primeBroker p.hedgeFund
+  -- rivalBroker is not a signatory or observer on this contract
+  -- queryContractId returns None — the contract doesn't exist on their node
+  result <- queryContractId rivalBroker cid
+  result === (None : Optional CollateralEligibility)

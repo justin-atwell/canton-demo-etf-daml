@@ -1,0 +1,208 @@
+module Canton.ETF.Test.PrimeBrokerage.SubstitutionRequestTest where
+
+import Daml.Script
+import DA.Assert
+import DA.Date (date, Month(..))
+import Canton.ETF.PrimeBrokerage.CollateralAsset
+import Canton.ETF.PrimeBrokerage.CollateralPool
+import Canton.ETF.PrimeBrokerage.SubstitutionRequest
+
+data Parties = Parties with
+  hedgeFund   : Party
+  primeBroker : Party
+  custodian   : Party
+  riskManager : Party
+
+setupParties : Script Parties
+setupParties = do
+  hedgeFund   <- allocateParty "HedgeFund"
+  primeBroker <- allocateParty "PrimeBroker"
+  custodian   <- allocateParty "Custodian"
+  riskManager <- allocateParty "RiskManager"
+  return Parties{..}
+
+-- | Pool seeded with a BTC position — this is what gets substituted out
+makePool : Party -> Party -> Party -> Time -> Script (ContractId CollateralPool)
+makePool hedgeFund custodian riskManager now =
+  submitMulti [hedgeFund, custodian] [] do
+    createCmd CollateralPool with
+      hedgeFund
+      custodian
+      riskManager
+      poolId    = "POOL-001"
+      positions =
+        [ CollateralPosition with
+            asset = BitcoinCollateral with
+              custodianRef  = "COINBASE-REF-001"
+              walletAddress = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+              quantity      = 10.0
+              spotPrice     = 65000.0
+              volatility30d = 0.45
+            haircut      = HaircutRate with rate = 0.25
+            positionId   = "POS-BTC-001"
+            postingParty = hedgeFund
+            valuedAt     = now
+        ]
+      totalValue  = 487500.0  -- 10 * 65000 * 0.75
+      lastUpdated = now
+
+-- | Standard substitution request — swap BTC out, treasury in
+makeRequest : Party -> Party -> Party -> Party -> ContractId CollateralPool -> Time -> Script (ContractId SubstitutionRequest)
+makeRequest hedgeFund primeBroker custodian riskManager poolCid now =
+  submit hedgeFund do
+    createCmd SubstitutionRequest with
+      hedgeFund
+      primeBroker
+      custodian
+      riskManager
+      requestId       = "REQ-001"
+      outgoingPosId   = "POS-BTC-001"
+      outgoingAsset   = BitcoinCollateral with
+        custodianRef  = "COINBASE-REF-001"
+        walletAddress = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+        quantity      = 10.0
+        spotPrice     = 65000.0
+        volatility30d = 0.45
+      incomingAsset   = TokenizedTreasury with
+        cusip           = "912796TY0"
+        maturityDate    = date 2027 Jun 30
+        faceValue       = 1000000.0
+        issuer          = "US Treasury"
+        accruedInterest = 5000.0
+      incomingHaircut = HaircutRate with rate = 0.03
+      poolCid
+      status      = Pending
+      createdAt   = now
+      updatedAt   = now
+
+-- | Incoming treasury position used in ConfirmTransfer
+makeTreasuryPosition : Party -> Time -> CollateralPosition
+makeTreasuryPosition hedgeFund now = CollateralPosition with
+  asset = TokenizedTreasury with
+    cusip           = "912796TY0"
+    maturityDate    = date 2027 Jun 30
+    faceValue       = 1000000.0
+    issuer          = "US Treasury"
+    accruedInterest = 5000.0
+  haircut      = HaircutRate with rate = 0.03
+  positionId   = "POS-TREASURY-001"
+  postingParty = hedgeFund
+  valuedAt     = now
+
+-- | Request creates in Pending state
+testCreateRequest : Script ()
+testCreateRequest = do
+  p   <- setupParties
+  now <- getTime
+  poolCid <- makePool p.hedgeFund p.custodian p.riskManager now
+  reqCid  <- makeRequest p.hedgeFund p.primeBroker p.custodian p.riskManager poolCid now
+  Some req <- queryContractId p.hedgeFund reqCid
+  req.status    === Pending
+  req.requestId === "REQ-001"
+
+-- | PrimeBroker approves — status advances to ApprovedByBroker
+testBrokerApproves : Script ()
+testBrokerApproves = do
+  p       <- setupParties
+  now     <- getTime
+  poolCid <- makePool p.hedgeFund p.custodian p.riskManager now
+  reqCid  <- makeRequest p.hedgeFund p.primeBroker p.custodian p.riskManager poolCid now
+  reqCid2 <- submit p.primeBroker do
+    exerciseCmd reqCid ApproveByCustodian with
+      comment = "Incoming treasury meets eligibility requirements"
+  Some req <- queryContractId p.hedgeFund reqCid2
+  req.status === ApprovedByBroker
+
+-- | PrimeBroker rejects — status becomes Rejected with reason
+testBrokerRejects : Script ()
+testBrokerRejects = do
+  p       <- setupParties
+  now     <- getTime
+  poolCid <- makePool p.hedgeFund p.custodian p.riskManager now
+  reqCid  <- makeRequest p.hedgeFund p.primeBroker p.custodian p.riskManager poolCid now
+  reqCid2 <- submit p.primeBroker do
+    exerciseCmd reqCid RejectByBroker with
+      reason = "Incoming asset does not meet concentration limits"
+  Some req <- queryContractId p.hedgeFund reqCid2
+  req.status === Rejected with
+    rejectionReason = "Incoming asset does not meet concentration limits"
+
+-- | Full happy path — create, approve, confirm
+-- Proves atomic pool update and request completion
+testFullSubstitutionWorkflow : Script ()
+testFullSubstitutionWorkflow = do
+  p       <- setupParties
+  now     <- getTime
+  poolCid <- makePool p.hedgeFund p.custodian p.riskManager now
+  reqCid  <- makeRequest p.hedgeFund p.primeBroker p.custodian p.riskManager poolCid now
+
+  -- step 1: broker approves
+  reqCid2 <- submit p.primeBroker do
+    exerciseCmd reqCid ApproveByCustodian with
+      comment = "Approved"
+
+  -- step 2: custodian confirms — returns both completed request AND updated pool
+  let incomingPos = makeTreasuryPosition p.hedgeFund now
+  (completedCid, newPoolCid) <- submit p.custodian do
+    exerciseCmd reqCid2 ConfirmTransfer with
+      newIncomingPosition = incomingPos
+
+  -- request is completed
+  Some req <- queryContractId p.hedgeFund completedCid
+  req.status === Completed
+
+  -- new pool has treasury position, not BTC
+  Some newPool <- queryContractId p.hedgeFund newPoolCid
+  length newPool.positions === 1
+  newPool.totalValue        === 974850.0  -- treasury value, not BTC
+
+-- | Old pool is archived after ConfirmTransfer — proves atomicity
+testOldPoolArchivedAfterTransfer : Script ()
+testOldPoolArchivedAfterTransfer = do
+  p       <- setupParties
+  now     <- getTime
+  poolCid <- makePool p.hedgeFund p.custodian p.riskManager now
+  reqCid  <- makeRequest p.hedgeFund p.primeBroker p.custodian p.riskManager poolCid now
+  reqCid2 <- submit p.primeBroker do
+    exerciseCmd reqCid ApproveByCustodian with comment = "Approved"
+  let incomingPos = makeTreasuryPosition p.hedgeFund now
+  (_, _) <- submit p.custodian do
+    exerciseCmd reqCid2 ConfirmTransfer with
+      newIncomingPosition = incomingPos
+  -- original poolCid is now archived — returns None
+  result <- queryContractId p.hedgeFund poolCid
+  result === (None : Optional CollateralPool)
+
+-- | Custodian cannot confirm before broker approves
+testCustodianCannotConfirmBeforeBrokerApproval : Script ()
+testCustodianCannotConfirmBeforeBrokerApproval = do
+  p       <- setupParties
+  now     <- getTime
+  poolCid <- makePool p.hedgeFund p.custodian p.riskManager now
+  reqCid  <- makeRequest p.hedgeFund p.primeBroker p.custodian p.riskManager poolCid now
+  let incomingPos = makeTreasuryPosition p.hedgeFund now
+  -- request is still Pending — custodian confirm should fail
+  submitMustFail p.custodian do
+    exerciseCmd reqCid ConfirmTransfer with
+      newIncomingPosition = incomingPos
+
+-- | HedgeFund cannot approve their own request
+testHedgeFundCannotApprove : Script ()
+testHedgeFundCannotApprove = do
+  p       <- setupParties
+  now     <- getTime
+  poolCid <- makePool p.hedgeFund p.custodian p.riskManager now
+  reqCid  <- makeRequest p.hedgeFund p.primeBroker p.custodian p.riskManager poolCid now
+  submitMustFail p.hedgeFund do
+    exerciseCmd reqCid ApproveByCustodian with
+      comment = "Self-approving — should fail"
+
+-- | RiskManager can observe the request but cannot act on it
+testRiskManagerCanObserve : Script ()
+testRiskManagerCanObserve = do
+  p       <- setupParties
+  now     <- getTime
+  poolCid <- makePool p.hedgeFund p.custodian p.riskManager now
+  reqCid  <- makeRequest p.hedgeFund p.primeBroker p.custodian p.riskManager poolCid now
+  Some req <- queryContractId p.riskManager reqCid
+  req.status === Pending
