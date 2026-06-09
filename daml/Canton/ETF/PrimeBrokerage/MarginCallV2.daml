@@ -1,0 +1,144 @@
+module Canton.ETF.PrimeBrokerage.MarginCallV2 where
+
+import Canton.ETF.PrimeBrokerage.CollateralPool
+
+-- | The lifecycle states of a margin call.
+-- Issued:             PrimeBroker has issued the call, awaiting response
+-- ResponseReceived:   HedgeFund has responded — under review
+-- Satisfied:          Margin requirement met — call closed
+-- Defaulted:          Response window expired — liquidation triggered
+data MarginCallStatus
+  = Issued
+  | ResponseReceived
+  | Satisfied
+  | Defaulted
+  deriving (Eq, Show)
+
+-- | How the HedgeFund chose to respond to the margin call.
+data ResponseType
+  = PostAdditionalCollateral  -- post more assets to the pool
+  | InitiateSubstitution      -- swap out an asset for a better one
+  | AcceptPartialLiquidation  -- accept that some assets will be sold
+  deriving (Eq, Show)
+
+-- | MarginCallV2 extends the existing MarginCall concept with:
+-- - Response window with deadline
+-- - Automatic default on expiry
+-- - Partial response handling
+-- - Liquidation trigger on default
+--
+-- Signatory: PrimeBroker — they issue the call unilaterally
+-- Observers: HedgeFund, RiskManager
+--
+-- Canton privacy: the HedgeFund sees this margin call.
+-- Other PrimeBrokers do NOT. Their exposure to this broker
+-- is invisible to competing brokers. That's the privacy model.
+template MarginCallV2
+  with
+    primeBroker      : Party
+    hedgeFund        : Party
+    riskManager      : Party
+    callId           : Text
+    poolCid          : ContractId CollateralPool
+    requiredCoverage : Decimal   -- total haircut-adjusted value required
+    currentCoverage  : Decimal   -- current haircut-adjusted value in pool
+    shortfall        : Decimal   -- requiredCoverage - currentCoverage
+    responseDeadline : Time      -- when the response window closes
+    status           : MarginCallStatus
+    issuedAt         : Time
+    updatedAt        : Time
+  where
+    signatory primeBroker
+    observer  hedgeFund, riskManager
+
+    ensure
+        requiredCoverage > 0.0 &&
+        shortfall        >= 0.0 &&
+        (status /= Issued || shortfall == requiredCoverage - currentCoverage)
+
+    -- | HedgeFund responds to the margin call within the window.
+    -- They declare their response type — the actual collateral movement
+    -- happens in a separate transaction (SubstitutionRequest or pool deposit).
+    -- This choice records the intent and advances the status.
+    choice RespondToCall : ContractId MarginCallV2
+      with
+        responseType : ResponseType
+        comment      : Text
+      controller hedgeFund
+      do
+        now <- getTime
+
+        -- response window must not have expired
+        assertMsg
+          ("Response deadline " <> show responseDeadline <>
+           " has passed. Current time: " <> show now)
+          (now <= responseDeadline)
+
+        create this with
+          status    = ResponseReceived
+          updatedAt = now
+
+    -- | PrimeBroker confirms the margin call is satisfied.
+    -- Called after verifying collateral coverage is restored.
+    choice SatisfyCall : ContractId MarginCallV2
+      with
+        newCoverage : Decimal
+      controller primeBroker
+      do
+        assertMsg
+          "New coverage must meet or exceed required coverage"
+          (newCoverage >= requiredCoverage)
+
+        now <- getTime
+        create this with
+          status          = Satisfied
+          currentCoverage = newCoverage
+          shortfall = 0.0
+          updatedAt       = now
+
+    -- | Triggered when the response window has expired with no response.
+    -- Any party can trigger this — it's a fact about time, not an action.
+    -- In production this is called by an automated monitor on the ledger.
+    -- Returns the defaulted margin call AND signals liquidation is needed.
+    --
+    -- Controller: primeBroker — they pull the trigger on default.
+    -- In production: an automated Canton trigger fires this.
+    choice DeclareDefault : ContractId MarginCallV2
+      controller primeBroker
+      do
+        now <- getTime
+
+        -- deadline must have actually passed
+        assertMsg
+          ("Response deadline has not passed yet. Deadline: " <>
+           show responseDeadline <> " Current time: " <> show now)
+          (now > responseDeadline)
+
+        -- call must still be in Issued state — not already responded to
+        assertMsg
+          "Cannot default a call that has received a response"
+          (status == Issued)
+
+        create this with
+          status    = Defaulted
+          updatedAt = now
+
+    -- | PrimeBroker updates coverage after partial collateral posting.
+    -- Used when HedgeFund posts some but not all required collateral.
+    -- If new coverage meets requirement, call is satisfied automatically.
+    choice UpdateCoverage : ContractId MarginCallV2
+      with
+        newCoverage : Decimal
+      controller primeBroker
+      do
+        now <- getTime
+        let newShortfall = requiredCoverage - newCoverage
+        let newStatus =
+              if newCoverage >= requiredCoverage
+              then Satisfied
+              else ResponseReceived
+        create this with
+          currentCoverage = newCoverage
+          shortfall       = if newShortfall < 0.0 then 0.0 else newShortfall
+          status          = newStatus
+          updatedAt       = now

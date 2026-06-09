@@ -1,0 +1,87 @@
+module Canton.ETF.Test.PrimeBrokerage.LiquidationWaterfallTest where
+
+import Daml.Script
+import DA.Date(date, Month(..))
+import DA.Time(addRelTime, hours)
+import Canton.ETF.PrimeBrokerage.CollateralAsset
+import Canton.ETF.PrimeBrokerage.CollateralPool
+import Canton.ETF.PrimeBrokerage.MarginCallV2
+
+data Parties = Parties with
+  primeBroker : Party
+  hedgeFund   : Party
+  custodian   : Party
+  riskManager : Party
+
+setupParties : Script Parties
+setupParties = do
+  primeBroker <- allocateParty "PrimeBroker"
+  hedgeFund   <- allocateParty "HedgeFund"
+  custodian   <- allocateParty "Custodian"
+  riskManager <- allocateParty "RiskManager"
+  return Parties{..}
+
+-- | Pool with all three asset types — MMF, Treasury, BTC
+-- Total haircut-adjusted value: $497,500 + $974,850 + $487,500 = $1,959,850
+makeFullPool : Party -> Party -> Party -> Time -> Script (ContractId CollateralPool)
+makeFullPool hedgeFund custodian riskManager now =
+  submitMulti [hedgeFund, custodian] [] do
+    createCmd CollateralPool with
+      hedgeFund
+      custodian
+      riskManager
+      poolId = "POOL-001"
+      positions =
+        [ CollateralPosition with
+            asset = MoneyMarketFundShare with
+              fundName    = "Fidelity Government MMF"
+              shareClass  = "Institutional"
+              navPerShare = 1.0
+              quantity    = 500000.0
+            haircut      = HaircutRate with rate = 0.005
+            positionId   = "POS-MMF-001"
+            postingParty = hedgeFund
+            valuedAt     = now
+        , CollateralPosition with
+            asset = TokenizedTreasury with
+              cusip           = "912796TY0"
+              maturityDate    = date 2027 Jun 30
+              faceValue       = 1000000.0
+              issuer          = "US Treasury"
+              accruedInterest = 5000.0
+            haircut      = HaircutRate with rate = 0.03
+            positionId   = "POS-TREASURY-001"
+            postingParty = hedgeFund
+            valuedAt     = now
+        , CollateralPosition with
+            asset = BitcoinCollateral with
+              custodianRef  = "COINBASE-REF-001"
+              walletAddress = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+              quantity      = 10.0
+              spotPrice     = 65000.0
+              volatility30d = 0.45
+            haircut      = HaircutRate with rate = 0.25
+            positionId   = "POS-BTC-001"
+            postingParty = hedgeFund
+            valuedAt     = now
+        ]
+      totalValue  = 1959850.0
+      lastUpdated = now
+
+-- | Defaulted margin call — response window expired
+makeDefaultedCall : Party -> Party -> Party -> ContractId CollateralPool -> Time -> Script (ContractId MarginCallV2)
+makeDefaultedCall primeBroker hedgeFund riskManager poolCid now =
+  submit primeBroker do
+    createCmd MarginCallV2 with
+      primeBroker
+      hedgeFund
+      riskManager
+      callId           = "CALL-001"
+      poolCid
+      requiredCoverage = 1000000.0
+      currentCoverage  = 800000.0
+      shortfall        = 200000.0
+      responseDeadline = addRelTime now (hours (-1))
+      status           = Issued
+      issuedAt         = now
+      updatedAt        = now

@@ -1,0 +1,253 @@
+module Canton.ETF.Test.PrimeBrokerage.MarginCallV2Test where
+
+import Daml.Script
+import DA.Assert
+import DA.Time
+import Canton.ETF.PrimeBrokerage.CollateralPool
+import Canton.ETF.PrimeBrokerage.MarginCallV2
+
+data Parties = Parties with
+  primeBroker : Party
+  hedgeFund   : Party
+  riskManager : Party
+
+setupParties : Script Parties
+setupParties = do
+  primeBroker <- allocateParty "PrimeBroker"
+  hedgeFund   <- allocateParty "HedgeFund"
+  riskManager <- allocateParty "RiskManager"
+  return Parties{..}
+
+-- | Reusable pool fixture
+makePool : Party -> Party -> Party -> Time -> Script (ContractId CollateralPool)
+makePool hedgeFund custodian riskManager now =
+  submitMulti [hedgeFund, custodian] [] do
+    createCmd CollateralPool with
+      hedgeFund
+      custodian
+      riskManager
+      poolId      = "POOL-001"
+      positions   = []
+      totalValue  = 800000.0
+      lastUpdated = now
+
+-- | Standard margin call — $200K shortfall, 2 hour response window
+makeMarginCall : Party -> Party -> Party -> ContractId CollateralPool -> Time -> Script (ContractId MarginCallV2)
+makeMarginCall primeBroker hedgeFund riskManager poolCid now =
+  submit primeBroker do
+    createCmd MarginCallV2 with
+      primeBroker
+      hedgeFund
+      riskManager
+      callId           = "CALL-001"
+      poolCid
+      requiredCoverage = 1000000.0
+      currentCoverage  = 800000.0
+      shortfall        = 200000.0
+      responseDeadline = addRelTime now (hours 2)
+      status           = Issued
+      issuedAt         = now
+      updatedAt        = now
+
+-- | Margin call creates in Issued state
+testCreateMarginCall : Script ()
+testCreateMarginCall = do
+  p       <- setupParties
+  now     <- getTime
+  custodian <- allocateParty "Custodian"
+  poolCid <- makePool p.hedgeFund custodian p.riskManager now
+  callCid <- makeMarginCall p.primeBroker p.hedgeFund p.riskManager poolCid now
+  Some call <- queryContractId p.primeBroker callCid
+  call.status   === Issued
+  call.shortfall === 200000.0
+
+-- | HedgeFund responds within window — status advances to ResponseReceived
+testHedgeFundResponds : Script ()
+testHedgeFundResponds = do
+  p         <- setupParties
+  now       <- getTime
+  custodian <- allocateParty "Custodian"
+  poolCid   <- makePool p.hedgeFund custodian p.riskManager now
+  callCid   <- makeMarginCall p.primeBroker p.hedgeFund p.riskManager poolCid now
+  callCid2  <- submit p.hedgeFund do
+    exerciseCmd callCid RespondToCall with
+      responseType = PostAdditionalCollateral
+      comment      = "Posting additional treasury collateral within the hour"
+  Some call <- queryContractId p.hedgeFund callCid2
+  call.status === ResponseReceived
+
+-- | PrimeBroker satisfies call after coverage is restored
+testSatisfyCall : Script ()
+testSatisfyCall = do
+  p         <- setupParties
+  now       <- getTime
+  custodian <- allocateParty "Custodian"
+  poolCid   <- makePool p.hedgeFund custodian p.riskManager now
+  callCid   <- makeMarginCall p.primeBroker p.hedgeFund p.riskManager poolCid now
+  callCid2  <- submit p.hedgeFund do
+    exerciseCmd callCid RespondToCall with
+      responseType = PostAdditionalCollateral
+      comment      = "Collateral posted"
+  callCid3  <- submit p.primeBroker do
+    exerciseCmd callCid2 SatisfyCall with
+      newCoverage = 1050000.0  -- exceeds requirement
+  Some call <- queryContractId p.primeBroker callCid3
+  call.status          === Satisfied
+  call.currentCoverage === 1050000.0
+
+-- | UpdateCoverage auto-satisfies when threshold met
+testUpdateCoverageAutoSatisfies : Script ()
+testUpdateCoverageAutoSatisfies = do
+  p         <- setupParties
+  now       <- getTime
+  custodian <- allocateParty "Custodian"
+  poolCid   <- makePool p.hedgeFund custodian p.riskManager now
+  callCid   <- makeMarginCall p.primeBroker p.hedgeFund p.riskManager poolCid now
+  -- partial post first
+  callCid2  <- submit p.primeBroker do
+    exerciseCmd callCid UpdateCoverage with
+      newCoverage = 900000.0  -- partial — still short
+  Some call1 <- queryContractId p.primeBroker callCid2
+  call1.status   === ResponseReceived
+  call1.shortfall === 100000.0
+  -- full coverage restored
+  callCid3  <- submit p.primeBroker do
+    exerciseCmd callCid2 UpdateCoverage with
+      newCoverage = 1000000.0  -- exactly meets requirement
+  Some call2 <- queryContractId p.primeBroker callCid3
+  call2.status   === Satisfied
+  call2.shortfall === 0.0
+
+-- | ensure rejects internally inconsistent margin call
+testInconsistentShortfallRejected : Script ()
+testInconsistentShortfallRejected = do
+  p         <- setupParties
+  now       <- getTime
+  custodian <- allocateParty "Custodian"
+  poolCid   <- makePool p.hedgeFund custodian p.riskManager now
+  -- shortfall doesn't match required - current
+  submitMustFail p.primeBroker do
+    createCmd MarginCallV2 with
+      primeBroker      = p.primeBroker
+      hedgeFund        = p.hedgeFund
+      riskManager      = p.riskManager
+      callId           = "CALL-BAD"
+      poolCid
+      requiredCoverage = 1000000.0
+      currentCoverage  = 800000.0
+      shortfall        = 999999.0  -- wrong — should be 200000.0
+      responseDeadline = addRelTime now (hours 2)
+      status           = Issued
+      issuedAt         = now
+      updatedAt        = now
+
+-- | HedgeFund cannot respond after deadline passes
+-- We set a deadline in the past to simulate expiry
+testResponseAfterDeadlineFails : Script ()
+testResponseAfterDeadlineFails = do
+  p         <- setupParties
+  now       <- getTime
+  custodian <- allocateParty "Custodian"
+  poolCid   <- makePool p.hedgeFund custodian p.riskManager now
+  -- deadline set 1 hour in the PAST
+  callCid   <- submit p.primeBroker do
+    createCmd MarginCallV2 with
+      primeBroker      = p.primeBroker
+      hedgeFund        = p.hedgeFund
+      riskManager      = p.riskManager
+      callId           = "CALL-EXPIRED"
+      poolCid
+      requiredCoverage = 1000000.0
+      currentCoverage  = 800000.0
+      shortfall        = 200000.0
+      responseDeadline = addRelTime now (hours (-1))  -- 1 hour ago
+      status           = Issued
+      issuedAt         = now
+      updatedAt        = now
+  submitMustFail p.hedgeFund do
+    exerciseCmd callCid RespondToCall with
+      responseType = PostAdditionalCollateral
+      comment      = "Too late"
+
+-- | PrimeBroker declares default after deadline passes
+testDeclareDefault : Script ()
+testDeclareDefault = do
+  p         <- setupParties
+  now       <- getTime
+  custodian <- allocateParty "Custodian"
+  poolCid   <- makePool p.hedgeFund custodian p.riskManager now
+  -- deadline in the past — window has closed
+  callCid   <- submit p.primeBroker do
+    createCmd MarginCallV2 with
+      primeBroker      = p.primeBroker
+      hedgeFund        = p.hedgeFund
+      riskManager      = p.riskManager
+      callId           = "CALL-DEFAULT"
+      poolCid
+      requiredCoverage = 1000000.0
+      currentCoverage  = 800000.0
+      shortfall        = 200000.0
+      responseDeadline = addRelTime now (hours (-1))
+      status           = Issued
+      issuedAt         = now
+      updatedAt        = now
+  callCid2 <- submit p.primeBroker do
+    exerciseCmd callCid DeclareDefault
+  Some call <- queryContractId p.primeBroker callCid2
+  call.status === Defaulted
+
+-- | Cannot default a call that has received a response
+testCannotDefaultAfterResponse : Script ()
+testCannotDefaultAfterResponse = do
+  p         <- setupParties
+  now       <- getTime
+  custodian <- allocateParty "Custodian"
+  poolCid   <- makePool p.hedgeFund custodian p.riskManager now
+  -- deadline in the past but fund already responded
+  callCid   <- submit p.primeBroker do
+    createCmd MarginCallV2 with
+      primeBroker      = p.primeBroker
+      hedgeFund        = p.hedgeFund
+      riskManager      = p.riskManager
+      callId           = "CALL-003"
+      poolCid
+      requiredCoverage = 1000000.0
+      currentCoverage  = 800000.0
+      shortfall        = 200000.0
+      responseDeadline = addRelTime now (hours 2)
+      status           = Issued
+      issuedAt         = now
+      updatedAt        = now
+  callCid2 <- submit p.hedgeFund do
+    exerciseCmd callCid RespondToCall with
+      responseType = PostAdditionalCollateral
+      comment      = "Responded in time"
+  -- manually advance to expired deadline version
+  -- by creating a defaulted-deadline call that already has ResponseReceived
+  callCid3 <- submit p.primeBroker do
+    createCmd MarginCallV2 with
+      primeBroker      = p.primeBroker
+      hedgeFund        = p.hedgeFund
+      riskManager      = p.riskManager
+      callId           = "CALL-003-EXPIRED"
+      poolCid
+      requiredCoverage = 1000000.0
+      currentCoverage  = 800000.0
+      shortfall        = 200000.0
+      responseDeadline = addRelTime now (hours (-1))
+      status           = ResponseReceived  -- already responded
+      issuedAt         = now
+      updatedAt        = now
+  submitMustFail p.primeBroker do
+    exerciseCmd callCid3 DeclareDefault
+
+-- | RiskManager can observe margin calls
+testRiskManagerCanObserve : Script ()
+testRiskManagerCanObserve = do
+  p         <- setupParties
+  now       <- getTime
+  custodian <- allocateParty "Custodian"
+  poolCid   <- makePool p.hedgeFund custodian p.riskManager now
+  callCid   <- makeMarginCall p.primeBroker p.hedgeFund p.riskManager poolCid now
+  Some call <- queryContractId p.riskManager callCid
+  call.shortfall === 200000.0

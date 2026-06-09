@@ -1,0 +1,177 @@
+module Canton.ETF.PrimeBrokerage.LiquidationWaterfall where
+
+import DA.List (sortOn)
+import DA.Foldable (mapA_)
+import Canton.ETF.PrimeBrokerage.CollateralAsset
+import Canton.ETF.PrimeBrokerage.CollateralPool
+import Canton.ETF.PrimeBrokerage.MarginCallV2
+
+-- | Priority order for liquidation.
+-- Lower number = liquidated first.
+-- MMF = 1 (most liquid, lowest haircut — sell first)
+-- Treasury = 2 (liquid but slightly more complex to sell)
+-- BTC = 3 (most volatile, hardest to liquidate — sell last)
+data LiquidationPriority
+  = LiquidationPriority with
+      assetClass : Text
+      priority   : Int
+  deriving (Eq, Show)
+
+-- | Record of a single liquidation step.
+-- One of these is created per position liquidated.
+-- This is the on-chain audit trail the regulator sees.
+data LiquidationStep 
+    = LiquidationStep with
+        positionId      : Text
+        assetClass      : Text
+        grossValue      : Decimal
+        haircutAdj      : Decimal
+        appliedToShortfall : Decimal  -- how much of the shortfall this step covered
+        remainingShortfall : Decimal  -- shortfall remaining after this step
+    deriving (Eq, Show)
+
+-- | The completion status of the waterfall.
+data WaterfallStatus
+  = InProgress
+  | ShortfallCovered    -- liquidation covered the full shortfall
+  | CollateralExhausted -- ran out of collateral before covering shortfall
+  deriving (Eq, Show)
+
+-- | LiquidationAuditEvent is an immutable on-chain record of a single
+-- liquidation step. Created once, never modified.
+-- The regulator's audit trail is built from these events.
+--
+-- Signatory: PrimeBroker — they execute the liquidation
+-- Observers: HedgeFund, RiskManager
+-- Note: Regulator would be added here in production with a proper
+-- Regulator party provisioned on the Canton network.
+template LiquidationAuditEvent
+  with
+    primeBroker  : Party
+    hedgeFund    : Party
+    riskManager  : Party
+    waterfallId  : Text
+    step         : LiquidationStep
+    executedAt   : Time
+  where
+    signatory primeBroker
+    observer  hedgeFund, riskManager
+
+-- | LiquidationWaterfall executes the priority-ordered liquidation
+-- of a CollateralPool against a defaulted MarginCallV2.
+--
+-- Signatory: PrimeBroker — they have the right to liquidate on default
+-- Observers: HedgeFund, RiskManager
+template LiquidationWaterfall
+  with
+    primeBroker     : Party
+    hedgeFund       : Party
+    riskManager     : Party
+    waterfallId     : Text
+    marginCallCid   : ContractId MarginCallV2
+    poolCid         : ContractId CollateralPool
+    originalShortfall : Decimal
+    remainingShortfall : Decimal
+    liquidationSteps : [LiquidationStep]
+    status          : WaterfallStatus
+    initiatedAt     : Time
+    updatedAt       : Time
+  where
+    signatory primeBroker
+    observer  hedgeFund, riskManager
+
+    ensure
+      originalShortfall  > 0.0 &&
+      remainingShortfall >= 0.0
+
+    -- | Execute the full waterfall in priority order.
+    -- Processes all positions, liquidating until shortfall is covered.
+    -- Creates a LiquidationAuditEvent for each position liquidated.
+    -- Returns the completed waterfall AND the updated pool.
+    choice ExecuteWaterfall : (ContractId LiquidationWaterfall, ContractId CollateralPool)
+      with
+        priorities : [LiquidationPriority]  -- caller specifies priority ordering
+      controller primeBroker
+      do
+        -- waterfall can only execute once
+        assertMsg
+          "Waterfall already executed"
+          (status == InProgress)
+
+        now   <- getTime
+        pool  <- fetch poolCid
+
+        -- assign priority to each position based on asset class
+        -- sortBy priority ascending = MMF first, BTC last
+        let priorityOf pos = case pos.asset of
+              TokenizedTreasury{}    -> 2
+              BitcoinCollateral{}    -> 3
+              MoneyMarketFundShare{} -> 1
+
+        let sortedPositions = sortOn priorityOf pool.positions
+
+        -- fold over sorted positions, liquidating until shortfall covered
+        -- accumulator: (remainingShortfall, steps, survivingPositions)
+        let (finalShortfall, steps, survivingPositions) =
+              foldl
+                (\(shortfall, accSteps, surviving) pos ->
+                  if shortfall <= 0.0
+                  then
+                    -- shortfall already covered — keep this position
+                    (shortfall, accSteps, surviving ++ [pos])
+                  else
+                    -- liquidate this position
+                    let adjValue = computeHaircutAdjustedValue pos.asset pos.haircut
+                        applied  = if adjValue >= shortfall then shortfall else adjValue
+                        remaining = shortfall - applied
+                        step = LiquidationStep with
+                          positionId         = pos.positionId
+                          assetClass         = case pos.asset of
+                            TokenizedTreasury{}    -> "TREASURY"
+                            BitcoinCollateral{}    -> "BTC"
+                            MoneyMarketFundShare{} -> "MMF"
+                          grossValue         = adjValue
+                          haircutAdj         = adjValue
+                          appliedToShortfall = applied
+                          remainingShortfall = remaining
+                    in (remaining, accSteps ++ [step], surviving)
+                )
+                (remainingShortfall, [], [])
+                sortedPositions
+
+        -- create an audit event for each liquidation step
+        mapA_
+            (\step -> create LiquidationAuditEvent with
+                primeBroker
+                hedgeFund
+                riskManager
+                waterfallId
+                step
+                executedAt = now)
+            steps
+
+        -- recompute pool with only surviving positions
+        let survivingTotal = foldl (+) 0.0
+              (map (\p -> computeHaircutAdjustedValue p.asset p.haircut)
+               survivingPositions)
+
+        -- archive old pool, create updated one
+        archive poolCid
+        newPoolCid <- create pool with
+          positions   = survivingPositions
+          totalValue  = survivingTotal
+          lastUpdated = now
+
+        -- determine final waterfall status
+        let finalStatus =
+              if finalShortfall <= 0.0
+              then ShortfallCovered
+              else CollateralExhausted
+
+        completedCid <- create this with
+          remainingShortfall = finalShortfall
+          liquidationSteps   = steps
+          status             = finalStatus
+          updatedAt          = now
+
+        return (completedCid, newPoolCid)
