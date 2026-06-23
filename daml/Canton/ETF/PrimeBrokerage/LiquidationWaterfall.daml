@@ -61,12 +61,13 @@ template LiquidationAuditEvent
 -- of a CollateralPool against a defaulted MarginCallV2.
 --
 -- Signatory: PrimeBroker — they have the right to liquidate on default
--- Observers: HedgeFund, RiskManager
+-- Observers: HedgeFund, RiskManager, custodian
 template LiquidationWaterfall
   with
     primeBroker     : Party
     hedgeFund       : Party
     riskManager     : Party
+    custodian       : Party
     waterfallId     : Text
     marginCallCid   : ContractId MarginCallV2
     poolCid         : ContractId CollateralPool
@@ -78,7 +79,7 @@ template LiquidationWaterfall
     updatedAt       : Time
   where
     signatory primeBroker
-    observer  hedgeFund, riskManager
+    observer  hedgeFund, riskManager, custodian
 
     ensure
       originalShortfall  > 0.0 &&
@@ -91,7 +92,7 @@ template LiquidationWaterfall
     choice ExecuteWaterfall : (ContractId LiquidationWaterfall, ContractId CollateralPool)
       with
         priorities : [LiquidationPriority]  -- caller specifies priority ordering
-      controller primeBroker
+      controller primeBroker, hedgeFund, custodian
       do
         -- waterfall can only execute once
         assertMsg
