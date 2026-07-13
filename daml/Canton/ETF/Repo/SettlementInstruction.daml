@@ -1,0 +1,84 @@
+module Canton.ETF.Repo.SettlementInstruction where
+
+import Canton.ETF.Repo.BondPosition
+
+-- | DvP settlement instruction. Referenced by RepoLeg via instructionId
+-- (a plain Text business-key field, looked up via ACS query — not a Daml
+-- key), not embedded — settlement has its own lifecycle
+-- (Pending -> Matched -> Settled | Failed) independent of the repo leg's
+-- own state, so a failed settlement doesn't force a RepoLeg redesign.
+--
+-- This is the Canton showcase contract: the atomic "I deliver the security,
+-- you deliver the cash" enforcement that Canton is uniquely good at.
+-- In this v1 scope, cash leg is represented by the instruction's existence
+-- and status rather than a separate cash-ledger contract; the security leg
+-- is enforced on-ledger via BondPosition.TransferHolder.
+
+data SettlementStatus
+  = PENDING
+  | MATCHED
+  | SETTLED
+  | FAILED
+  deriving (Eq, Show)
+
+template SettlementInstruction
+  with
+    dealer: Party
+    counterparty: Party
+    custodian: Party
+    instructionId: Text
+    positionId: Text          -- matches BondPosition.positionId; resolved to a ContractId by the Java service before Settle is exercised
+    fromHolder: Party         -- current holder of the security (dealer on open leg, counterparty on close leg)
+    toHolder: Party           -- receiving party
+    status: SettlementStatus
+    repoLegRef: Text          -- business key of the RepoLeg this instruction settles
+  where
+    signatory dealer, counterparty, custodian
+
+    ensure fromHolder /= toHolder
+
+    -- Both economic counterparties affirm the instruction is ready.
+    -- Custodian is deliberately excluded here — matching is a dealer/
+    -- counterparty concern, custody execution is a separate step.
+    choice MatchInstruction : ContractId SettlementInstruction
+      controller dealer, counterparty
+      do
+        assertMsg "Instruction must be PENDING to match" (status == PENDING)
+        create this with status = MATCHED
+
+    -- The atomic transfer. Takes the BondPosition's current ContractId as
+    -- an explicit parameter — the Java service resolves it via ACS query
+    -- on positionId immediately before submitting this choice, same
+    -- capture-then-lookup discipline as MarginCallV2/LiquidationWaterfall.
+    -- All three parties must be authorizers because this exercises
+    -- BondPosition.TransferHolder, which requires the current holder, new
+    -- holder, AND custodian as authorizers (readAs is not sufficient for
+    -- fetch/archive/create — see BondPosition). Single submitAndWait call,
+    -- actAs = [dealer, counterparty, custodian], same shape as
+    -- LiquidationWaterfall.ExecuteWaterfall.
+    choice Settle : ContractId SettlementInstruction
+      with
+        bondPositionCid: ContractId BondPosition
+      controller dealer, counterparty, custodian
+      do
+        assertMsg "Instruction must be MATCHED before settling" (status == MATCHED)
+        bondPos <- fetch bondPositionCid
+        assertMsg "BondPosition does not match this instruction's positionId"
+          (bondPos.positionId == positionId)
+        assertMsg "BondPosition holder does not match instruction's fromHolder"
+          (bondPos.holder == fromHolder)
+        exercise bondPositionCid TransferHolder with
+          newHolder = toHolder
+          newEncumbranceRef = Some repoLegRef
+        create this with status = SETTLED
+
+    -- Custodian-initiated failure (e.g. security not available, cash not
+    -- confirmed). FailNotice contract creation is a follow-on increment —
+    -- not built in this pass, noted here so it isn't lost.
+    choice MarkFailed : ContractId SettlementInstruction
+      with
+        reason: Text
+      controller custodian
+      do
+        assertMsg "Cannot fail an already-settled instruction" (status /= SETTLED)
+        create this with status = FAILED

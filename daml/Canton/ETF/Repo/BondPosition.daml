@@ -1,0 +1,74 @@
+module Canton.ETF.Repo.BondPosition where
+
+-- Unified source of truth for a party's fixed income holdings.
+-- Referenced (not owned) by CollateralPool (Prime Brokerage) and RepoLeg
+-- (Repo), each of which stamps an encumbrance marker rather than duplicating
+-- bond data. This keeps "what does this party actually hold" single-sourced
+-- across verticals.
+--
+-- NOTE: No Daml `key` here — Canton does not support contract keys (they
+-- require global uniqueness guarantees that conflict with Canton's
+-- privacy/sub-transaction model). positionId is a plain Text field.
+-- Lookup-by-business-key happens in the Java service layer via ACS query,
+-- same pattern as callId/waterfallId elsewhere in this codebase.
+
+data EncumbranceType
+  = UNENCUMBERED
+  | REPO_COLLATERAL
+  | PRIME_BROKERAGE_COLLATERAL
+  deriving (Eq, Show)
+
+template BondPosition
+  with
+    holder: Party
+    custodian: Party
+    positionId: Text        -- business key field; matched via ACS query, not a Daml key
+    cusip: Text
+    faceValue: Decimal
+    couponRate: Decimal
+    maturityDate: Date
+    encumbrance: EncumbranceType
+    encumbranceRef: Optional Text  -- business key of the RepoAgreement/RepoLeg or CollateralPool currently using this position
+  where
+    signatory holder, custodian
+
+    ensure faceValue > 0.0
+
+    -- Lien-style encumbrance flip (Prime Brokerage pattern). Holder does NOT
+    -- change — matches CollateralPool.AddPosition semantics where the hedge
+    -- fund keeps title and the custodian marks the position pledged.
+    choice MarkEncumbered : ContractId BondPosition
+      with
+        newEncumbrance: EncumbranceType
+        ref: Text
+      controller holder, custodian
+      do
+        assertMsg "Position must be unencumbered before marking" (encumbrance == UNENCUMBERED)
+        create this with
+          encumbrance = newEncumbrance
+          encumbranceRef = Some ref
+
+    choice MarkUnencumbered : ContractId BondPosition
+      controller holder, custodian
+      do
+        create this with
+          encumbrance = UNENCUMBERED
+          encumbranceRef = None
+
+    -- True title transfer (Repo pattern). Distinct from MarkEncumbered:
+    -- this changes `holder`, not just a flag. All three of current holder,
+    -- new holder, and custodian must be authorizers — the custodian is a
+    -- signatory being asked to archive-and-recreate a contract it co-signs,
+    -- and per the readAs-is-not-authorization rule, visibility alone is
+    -- insufficient. This choice is exercised internally by
+    -- SettlementInstruction.Settle, not called directly by API consumers.
+    choice TransferHolder : ContractId BondPosition
+      with
+        newHolder: Party
+        newEncumbranceRef: Optional Text
+      controller holder, newHolder, custodian
+      do
+        create this with
+          holder = newHolder
+          encumbrance = REPO_COLLATERAL
+          encumbranceRef = newEncumbranceRef

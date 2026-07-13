@@ -1,0 +1,259 @@
+module Canton.ETF.Test.Repo.BondPositionSettlementTest where
+
+import Daml.Script
+import DA.Assert
+import DA.List (head)
+import DA.Date (date, Month(..))
+import Canton.ETF.Repo.BondPosition
+import Canton.ETF.Repo.SettlementInstruction
+
+data TestParties = TestParties
+  with
+    dealer: Party
+    counterparty: Party
+    custodian: Party
+    riskManager: Party  -- unauthorized third party, used for negative tests
+
+setupParties : Script TestParties
+setupParties = do
+  dealer <- allocateParty "Dealer"
+  counterparty <- allocateParty "Counterparty"
+  custodian <- allocateParty "Custodian"
+  riskManager <- allocateParty "RiskManager"
+  pure TestParties with dealer, counterparty, custodian, riskManager
+
+mkBondPosition : TestParties -> Script (ContractId BondPosition)
+mkBondPosition tp =
+  submit tp.dealer $ createCmd BondPosition with
+    holder = tp.dealer
+    custodian = tp.custodian
+    positionId = "BOND-001"
+    cusip = "912828XG8"
+    faceValue = 10_000_000.0
+    couponRate = 0.045
+    maturityDate = date 2029 Jun 15
+    encumbrance = UNENCUMBERED
+    encumbranceRef = None
+
+-- No Daml key on BondPosition (Canton doesn't support keys), so lookups by
+-- business key are done here the same way the Java service layer does them:
+-- query all active BondPosition contracts visible to `party`, then filter
+-- in-memory by positionId. This mirrors getByBusinessKey in LedgerCommandService.
+findBondPositionByPositionId : Party -> Text -> Script (ContractId BondPosition, BondPosition)
+findBondPositionByPositionId party posId = do
+  results <- query @BondPosition party
+  let matches = filter (\(_, bp) -> bp.positionId == posId) results
+  pure (head matches)
+
+-- 1. Happy path: full repo settlement lifecycle, open leg.
+-- Dealer holds the bond, agrees to deliver it to Counterparty for cash.
+test_happyPath_openLegSettlement : Script ()
+test_happyPath_openLegSettlement = do
+  tp <- setupParties
+  bondCid <- mkBondPosition tp
+
+  instrCid <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    createCmd SettlementInstruction with
+      dealer = tp.dealer
+      counterparty = tp.counterparty
+      custodian = tp.custodian
+      instructionId = "SI-001"
+      positionId = "BOND-001"
+      fromHolder = tp.dealer
+      toHolder = tp.counterparty
+      status = PENDING
+      repoLegRef = "REPOLEG-001-OPEN"
+
+  -- Match: dealer + counterparty only, custodian NOT required here.
+  instrCid1 <- submitMulti [tp.dealer, tp.counterparty] [] $
+    exerciseCmd instrCid MatchInstruction
+
+  -- Resolve the current BondPosition ContractId immediately before Settle —
+  -- capture-then-lookup, same discipline as MarginCallV2/LiquidationWaterfall.
+  (currentBondCid, _) <- findBondPositionByPositionId tp.custodian "BOND-001"
+
+  -- Settle: all three required, plus the resolved bondPositionCid.
+  instrCid2 <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    exerciseCmd instrCid1 Settle with bondPositionCid = currentBondCid
+
+  Some settled <- queryContractId tp.custodian instrCid2
+  settled.status === SETTLED
+
+  -- Confirm a fresh position exists under the counterparty, found by
+  -- filtering on positionId (not the old ContractId, which is now archived).
+  (newBondCid, newBond) <- findBondPositionByPositionId tp.custodian "BOND-001"
+  newBond.holder === tp.counterparty
+  newBond.encumbrance === REPO_COLLATERAL
+  newBond.encumbranceRef === Some "REPOLEG-001-OPEN"
+  (newBondCid /= bondCid) === True  -- confirm it's genuinely a new ContractId
+
+  -- Old contractId should no longer be active (archived by TransferHolder).
+  oldStillActive <- queryContractId tp.custodian bondCid
+  oldStillActive === (None : Optional BondPosition)
+
+-- 2. Authorization test: Settle must fail if custodian is not an authorizer.
+-- This is the exact failure mode the readAs-is-not-authorization pattern
+-- warns about — dealer+counterparty alone is insufficient even though
+-- custodian could in principle "see" the instruction as a signatory.
+test_settleFailsWithoutCustodianAuthorization : Script ()
+test_settleFailsWithoutCustodianAuthorization = do
+  tp <- setupParties
+  bondCid <- mkBondPosition tp
+
+  instrCid <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    createCmd SettlementInstruction with
+      dealer = tp.dealer
+      counterparty = tp.counterparty
+      custodian = tp.custodian
+      instructionId = "SI-002"
+      positionId = "BOND-001"
+      fromHolder = tp.dealer
+      toHolder = tp.counterparty
+      status = PENDING
+      repoLegRef = "REPOLEG-002-OPEN"
+
+  instrCid1 <- submitMulti [tp.dealer, tp.counterparty] [] $
+    exerciseCmd instrCid MatchInstruction
+
+  -- Attempt Settle with only dealer + counterparty in actAs (no custodian).
+  -- Expected: DAML_AUTHORIZATION_ERROR.
+  submitMultiMustFail [tp.dealer, tp.counterparty] [] $
+    exerciseCmd instrCid1 Settle with bondPositionCid = bondCid
+
+-- 3. Authorization test: an uninvolved third party cannot match or settle.
+test_unauthorizedPartyCannotMatch : Script ()
+test_unauthorizedPartyCannotMatch = do
+  tp <- setupParties
+  _ <- mkBondPosition tp
+
+  instrCid <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    createCmd SettlementInstruction with
+      dealer = tp.dealer
+      counterparty = tp.counterparty
+      custodian = tp.custodian
+      instructionId = "SI-003"
+      positionId = "BOND-001"
+      fromHolder = tp.dealer
+      toHolder = tp.counterparty
+      status = PENDING
+      repoLegRef = "REPOLEG-003-OPEN"
+
+  submitMultiMustFail [tp.riskManager] [] $
+    exerciseCmd instrCid MatchInstruction
+
+-- 4. State machine guard: cannot Settle an instruction still PENDING
+-- (i.e. MatchInstruction was skipped).
+test_cannotSettleUnmatchedInstruction : Script ()
+test_cannotSettleUnmatchedInstruction = do
+  tp <- setupParties
+  bondCid <- mkBondPosition tp
+
+  instrCid <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    createCmd SettlementInstruction with
+      dealer = tp.dealer
+      counterparty = tp.counterparty
+      custodian = tp.custodian
+      instructionId = "SI-004"
+      positionId = "BOND-001"
+      fromHolder = tp.dealer
+      toHolder = tp.counterparty
+      status = PENDING
+      repoLegRef = "REPOLEG-004-OPEN"
+
+  submitMultiMustFail [tp.dealer, tp.counterparty, tp.custodian] [] $
+    exerciseCmd instrCid Settle with bondPositionCid = bondCid
+
+-- 5. Round trip: open leg transfer followed by close leg transfer back.
+-- Confirms TransferHolder + business-key (positionId) lookup works
+-- symmetrically in both directions.
+test_roundTrip_openThenClose : Script ()
+test_roundTrip_openThenClose = do
+  tp <- setupParties
+  _ <- mkBondPosition tp
+
+  -- Open leg: dealer -> counterparty
+  openCid <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    createCmd SettlementInstruction with
+      dealer = tp.dealer
+      counterparty = tp.counterparty
+      custodian = tp.custodian
+      instructionId = "SI-005-OPEN"
+      positionId = "BOND-001"
+      fromHolder = tp.dealer
+      toHolder = tp.counterparty
+      status = PENDING
+      repoLegRef = "REPOLEG-005-OPEN"
+
+  openCid1 <- submitMulti [tp.dealer, tp.counterparty] [] $
+    exerciseCmd openCid MatchInstruction
+
+  (bondCidBeforeOpen, _) <- findBondPositionByPositionId tp.custodian "BOND-001"
+  _ <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    exerciseCmd openCid1 Settle with bondPositionCid = bondCidBeforeOpen
+
+  (_, afterOpen) <- findBondPositionByPositionId tp.custodian "BOND-001"
+  afterOpen.holder === tp.counterparty
+
+  -- Close leg: counterparty -> dealer (return the security)
+  closeCid <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    createCmd SettlementInstruction with
+      dealer = tp.dealer
+      counterparty = tp.counterparty
+      custodian = tp.custodian
+      instructionId = "SI-005-CLOSE"
+      positionId = "BOND-001"
+      fromHolder = tp.counterparty
+      toHolder = tp.dealer
+      status = PENDING
+      repoLegRef = "REPOLEG-005-CLOSE"
+
+  closeCid1 <- submitMulti [tp.dealer, tp.counterparty] [] $
+    exerciseCmd closeCid MatchInstruction
+
+  (bondCidBeforeClose, _) <- findBondPositionByPositionId tp.custodian "BOND-001"
+  _ <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    exerciseCmd closeCid1 Settle with bondPositionCid = bondCidBeforeClose
+
+  (_, afterClose) <- findBondPositionByPositionId tp.custodian "BOND-001"
+  afterClose.holder === tp.dealer
+
+-- 6. Prime Brokerage lien path regression: MarkEncumbered / MarkUnencumbered
+-- must NOT change holder (lien semantics), unlike TransferHolder. This
+-- guards against the two encumbrance mechanisms being accidentally merged.
+test_pbLienPath_holderUnchanged : Script ()
+test_pbLienPath_holderUnchanged = do
+  tp <- setupParties
+  bondCid <- mkBondPosition tp
+
+  markedCid <- submitMulti [tp.dealer, tp.custodian] [] $
+    exerciseCmd bondCid MarkEncumbered with
+      newEncumbrance = PRIME_BROKERAGE_COLLATERAL
+      ref = "POOL-001"
+
+  Some marked <- queryContractId tp.custodian markedCid
+  marked.holder === tp.dealer  -- unchanged, lien not transfer
+  marked.encumbrance === PRIME_BROKERAGE_COLLATERAL
+
+  unmarkedCid <- submitMulti [tp.dealer, tp.custodian] [] $
+    exerciseCmd markedCid MarkUnencumbered
+
+  Some unmarked <- queryContractId tp.custodian unmarkedCid
+  unmarked.holder === tp.dealer
+  unmarked.encumbrance === UNENCUMBERED
+  unmarked.encumbranceRef === None
+
+-- 7. Guard: cannot double-encumber a position already marked.
+test_cannotMarkEncumberedTwice : Script ()
+test_cannotMarkEncumberedTwice = do
+  tp <- setupParties
+  bondCid <- mkBondPosition tp
+
+  markedCid <- submitMulti [tp.dealer, tp.custodian] [] $
+    exerciseCmd bondCid MarkEncumbered with
+      newEncumbrance = PRIME_BROKERAGE_COLLATERAL
+      ref = "POOL-001"
+
+  submitMultiMustFail [tp.dealer, tp.custodian] [] $
+    exerciseCmd markedCid MarkEncumbered with
+      newEncumbrance = REPO_COLLATERAL
+      ref = "REPOLEG-999"
