@@ -257,3 +257,79 @@ test_cannotMarkEncumberedTwice = do
     exerciseCmd markedCid MarkEncumbered with
       newEncumbrance = REPO_COLLATERAL
       ref = "REPOLEG-999"
+
+  -- 8. Happy path: custodian marks a PENDING instruction as failed.
+test_markFailed_happyPath : Script ()
+test_markFailed_happyPath = do
+  tp <- setupParties
+  _ <- mkBondPosition tp
+
+  instrCid <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    createCmd SettlementInstruction with
+      dealer = tp.dealer
+      counterparty = tp.counterparty
+      custodian = tp.custodian
+      instructionId = "SI-006"
+      positionId = "BOND-001"
+      fromHolder = tp.dealer
+      toHolder = tp.counterparty
+      status = PENDING
+      repoLegRef = "REPOLEG-006-OPEN"
+
+  failedCid <- submit tp.custodian $
+    exerciseCmd instrCid MarkFailed with
+      reason = "Security not available at custody"
+
+  Some failed <- queryContractId tp.custodian failedCid
+  failed.status === FAILED
+
+-- 9. Guard test: cannot MarkFailed an instruction that has already SETTLED.
+-- This is the exact case the assertMsg inside MarkFailed exists to prevent.
+test_cannotMarkFailedAfterSettled : Script ()
+test_cannotMarkFailedAfterSettled = do
+  tp <- setupParties
+  bondCid <- mkBondPosition tp
+
+  instrCid <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    createCmd SettlementInstruction with
+      dealer = tp.dealer
+      counterparty = tp.counterparty
+      custodian = tp.custodian
+      instructionId = "SI-007"
+      positionId = "BOND-001"
+      fromHolder = tp.dealer
+      toHolder = tp.counterparty
+      status = PENDING
+      repoLegRef = "REPOLEG-007-OPEN"
+
+  instrCid1 <- submitMulti [tp.dealer, tp.counterparty] [] $
+    exerciseCmd instrCid MatchInstruction
+
+  instrCid2 <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    exerciseCmd instrCid1 Settle with bondPositionCid = bondCid
+
+  submitMustFail tp.custodian $
+    exerciseCmd instrCid2 MarkFailed with
+      reason = "Attempting to fail after settlement"
+
+-- 10. Controller test: dealer alone cannot call MarkFailed (custodian-only choice).
+test_dealerCannotMarkFailed : Script ()
+test_dealerCannotMarkFailed = do
+  tp <- setupParties
+  _ <- mkBondPosition tp
+
+  instrCid <- submitMulti [tp.dealer, tp.counterparty, tp.custodian] [] $
+    createCmd SettlementInstruction with
+      dealer = tp.dealer
+      counterparty = tp.counterparty
+      custodian = tp.custodian
+      instructionId = "SI-008"
+      positionId = "BOND-001"
+      fromHolder = tp.dealer
+      toHolder = tp.counterparty
+      status = PENDING
+      repoLegRef = "REPOLEG-008-OPEN"
+
+  submitMustFail tp.dealer $
+    exerciseCmd instrCid MarkFailed with
+      reason = "Dealer trying to fail their own instruction"    
